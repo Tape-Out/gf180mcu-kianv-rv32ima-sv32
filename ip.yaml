@@ -1,0 +1,88 @@
+name: gf180mcu-kianv-rv32ima-sv32
+version: 0.1.0
+spec: '0.1'
+kind: ip
+lang: sv
+identity:
+  slug: gf180mcu-kianv-rv32ima-sv32-tapeout-foreign
+  display_name: KianV Sv32 Linux SoC
+  summary: 'Hirosh Dabui''s KianV Linux SoC as taped out on GF180MCU: the RV32IMA Sv32 core with a UART, three SPI masters and an SDRAM controller, taken as a black box.'
+  category: soc
+  subcategories:
+  - riscv
+  ip_family: kianriscv
+  integration_profile: []
+  maturity: planned
+contract:
+  version: 1
+  ctrl:
+    shape: none
+    aw: 32
+    dw: 32
+params:
+  systemClk: { type: int, default: 50000000, range: [10000000, 100000000], desc: 时钟频率，SDRAM 的时序拍数、计时器与软件读到的主频都按它算 }
+  # TLB 是组相联的，条目数经 $clog2，得是 2 的幂；上游流片用 32
+  itlbEntries: { type: choice, values: [8, 16, 32, 64], default: 32, desc: 取指 TLB 条目数 }
+  dtlbEntries: { type: choice, values: [8, 16, 32, 64], default: 32, desc: 访存 TLB 条目数 }
+emit:
+- kind: foreign
+  lang: sv
+  top: chip_core
+  rtl:
+  - third_party/gf180mcu-kianv-rv32ima-sv32/src/chip_core.sv
+  # 缓存与它的 SRAM 包装也要列上：旁路之后没人例化它们，但 yosys 按默认参数查每个模块时要找得到
+  - { glob: "third_party/gf180mcu-kianv-rv32ima-sv32/src/*.v" }
+  - third_party/gf180mcu-kianv-rv32ima-sv32/src/sdram/mt48lc16m16a2_ctrl.v
+  - { glob: "third_party/gf180mcu-kianv-rv32ima-sv32/src/kianv_harris_edition/*.v" }
+  includes:
+  - third_party/gf180mcu-kianv-rv32ima-sv32/src
+  - third_party/gf180mcu-kianv-rv32ima-sv32/src/kianv_harris_edition
+  # 上游的流片配置（librelane/config.yaml 的 VERILOG_DEFINES），缓存除外
+  defines:
+    SYSTEM_CLK: systemClk
+    NUM_ENTRIES_ITLB: itlbEntries
+    NUM_ENTRIES_DTLB: dtlbEntries
+    TRP_NS: 15
+    TRCD_NS: 15
+    TRFC_NS: 66
+    TWR_NS: 15
+    CAS: 2
+    TREFI_NS: 7800
+    BYPASS_CACHES: 1
+    SYNTHESIS: 1
+  clock:
+    port: clk
+  reset:
+    port: rst_n
+    active: low
+    sync: false
+  ports:
+  # 上游把全部引脚并成一条 54 位的双向焊盘总线，位次在 chip_core.sv 的 localparam 里
+  - endpoint: pads
+    kind: physical
+    type: KianvPads
+    map:
+      i: bidir_in
+      o: bidir_out
+      oe: bidir_oe
+      cs: bidir_cs
+      sl: bidir_sl
+      ie: bidir_ie
+      pu: bidir_pu
+      pd: bidir_pd
+  limits:
+  - 上游的指令与数据缓存建在 GF180MCU 的 SRAM 宏上，这里固定走旁路（BYPASS_CACHES），每次取指与访存都到片外 SDRAM
+  - bidir_cs、bidir_sl、bidir_ie、bidir_pu、bidir_pd 是 GF180MCU 焊盘的配置线，换工艺后没有去处
+  - SDRAM 固定按 32 MiB 的 MT48LC16M16A2 算，字节数是上游头文件里写死的宏
+  - 程序在片外 SPI Flash 里，复位后从 0x2010_0000 取指；主存是片外 16 位 SDRAM，片上没有存储
+  - 串口波特率的分频值复位后是 1，要软件写 0x1000_000C 才出得了字
+tasks:
+  hello:
+    desc: 测试台带片外的 SDRAM、Flash 与串口模型，从 Flash 起一段裸机程序，读写 SDRAM 后从串口报结果
+    run: bash htest/hello.sh {{out}} systemClk={{knob.systemClk}} itlbEntries={{knob.itlbEntries}} dtlbEntries={{knob.dtlbEntries}}
+test:
+  upstream:
+  - { name: hello, task: hello, timeout: 1800 }
+targets:
+  foreign:
+    driver: foreign

@@ -1,0 +1,4 @@
+expect KianV hello
+expect sdram ok 00000000
+expect mem 02000000
+expect done

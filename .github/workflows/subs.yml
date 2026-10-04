@@ -1,0 +1,14 @@
+name: subs
+
+on:
+  schedule:
+    # 半月一次：上游往前走了子模块不会自己跟，不跟不会报错，只会越来越旧
+    - cron: "23 4 1,16 * *"
+  workflow_dispatch:
+
+jobs:
+  subs:
+    uses: Tape-Out/.github/.github/workflows/subs.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
