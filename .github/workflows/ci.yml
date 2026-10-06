@@ -7,6 +7,5 @@ jobs:
       contents: write
     with:
       # hello 任务用 Verilator 跑测试台，程序用裸机的 RISC-V GCC 编；htest/args.py 读清单要 PyYAML
-      apt: gcc-riscv64-unknown-elf
+      apt: verilator gcc-riscv64-unknown-elf
       pip: pyyaml
-      verilator: v5.032
