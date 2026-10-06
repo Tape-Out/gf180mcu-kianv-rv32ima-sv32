@@ -4,7 +4,8 @@
 //   +flash=<文件>@<偏移>   往 Flash 里放一段，可多次给
 //   +sdram=<文件>@<偏移>   直接放进 SDRAM，不经引导程序搬（riscv-tests 用，调试也用）
 //   +tohost=<地址>         盯 riscv-tests 的 tohost：写 1 算过，写别的数算不过；给了它就不必给脚本
-//   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过
+//   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过；
+//                          reject <文本> 不占次序，串口上一出现这段字就算不过，不必等到 +max
 //   +restore=<文件>        从 save 存下的断点接着跑，脚本从头走
 //   +spiecho               两路 SPI 上各挂一个回声从设备；不给时 MISO 是高的，像没插卡、没接网卡
 //   +uartdiv=<n>           串口每位占几个时钟
@@ -248,6 +249,8 @@ int main(int argc, char **argv) {
   Echo sd, net;
   bool spiecho = false;
   std::vector<Step> script;
+  std::vector<std::string> rejects;
+  std::string hit;
   std::string restore;
   uint64_t max = 50'000'000, beat = 0;
 
@@ -277,6 +280,7 @@ int main(int argc, char **argv) {
         if (l.rfind("expect ", 0) == 0) script.push_back({'e', unesc(l.substr(7))});
         else if (l.rfind("send ", 0) == 0) script.push_back({'s', unesc(l.substr(5))});
         else if (l.rfind("save ", 0) == 0) script.push_back({'c', l.substr(5)});
+        else if (l.rfind("reject ", 0) == 0) rejects.push_back(unesc(l.substr(7)));
       }
     }
   }
@@ -312,7 +316,7 @@ int main(int argc, char **argv) {
   uint64_t start = cyc;
   auto t0 = std::chrono::steady_clock::now();
   auto waiting = [&] { return at < script.size() || (sdram.watch >= 0 && !sdram.hit); };
-  for (; cyc - start < max && waiting(); ++cyc) {
+  for (; cyc - start < max && waiting() && hit.empty(); ++cyc) {
     if (at < script.size() && script[at].kind == 'c') {
       ckpt(script[at].text, true);
       ++at, from = uart.seen.size();
@@ -339,6 +343,8 @@ int main(int argc, char **argv) {
       putchar(c);
       fflush(stdout);
       uart.seen += c;
+      for (auto &r : rejects)
+        if (uart.seen.size() >= r.size() && !uart.seen.compare(uart.seen.size() - r.size(), r.size(), r)) hit = r;
     }
     uart.send();
 
@@ -366,13 +372,14 @@ int main(int argc, char **argv) {
   }
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  bool ok = sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty();
+  bool ok = hit.empty() && (sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty());
   if (sdram.watch >= 0 && !sdram.hit) fprintf(stderr, "\n没等到程序写 tohost");
   if (sdram.hit && sdram.host != 1) fprintf(stderr, "\ntohost 写的是 %u：第 %u 项不过", sdram.host, sdram.host >> 1);
   fprintf(stderr, "\n%s：到第 %llu 个周期，这次跑了 %llu 个，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
           ok ? "过" : "没过", (unsigned long long)cyc, (unsigned long long)(cyc - start), s, (cyc - start) / s / 1e3,
           sdram.reads, sdram.writes, at, script.size());
-  if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].kind == 's' ? "send" : "expect", script[at].text.c_str());
+  if (!hit.empty()) fprintf(stderr, "撞上：reject %s\n", hit.c_str());
+  else if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].kind == 's' ? "send" : "expect", script[at].text.c_str());
   top->final();
   delete top;
   return ok ? 0 : 1;
