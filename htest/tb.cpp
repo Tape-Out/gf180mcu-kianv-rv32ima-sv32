@@ -3,9 +3,15 @@
 //
 //   +flash=<文件>@<偏移>   往 Flash 里放一段，可多次给
 //   +sdram=<文件>@<偏移>   直接写进 SDRAM，只给调试用
-//   +script=<文件>         逐行 expect <文本> / send <文本>，全部走完算过
+//   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过
+//   +restore=<文件>        从 save 存下的断点接着跑，脚本从头走
 //   +uartdiv=<n>           串口每位占几个时钟
+//   +pace=<n>              往芯片发的相邻两个字之间空几个时钟
 //   +max=<n>               最多跑几个时钟周期，到了还没走完算不过
+//   +beat=<n>              每 n 个周期往标准错误报一次进度：小时级的仿真要看得出它还活着
+//
+// 断点是给 Linux 用的：起到 shell 要仿一个多小时，存一次，之后调命令从断点起。
+// 片上的串口接收缓冲只有 16 个字，内核又是按时钟节拍去取的，一口气发一整行会冲掉，所以要 +pace。
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +24,7 @@
 
 #include "Vtb.h"
 #include "verilated.h"
+#include "verilated_save.h"
 
 namespace pad {
 enum : int {
@@ -29,6 +36,22 @@ enum : int {
 }
 
 static inline uint64_t bits(uint64_t v, int lo, int n) { return (v >> lo) & ((1ull << n) - 1); }
+
+// 断点文件里的标量与数组都按内存里的样子原样读写，只在同一台机器上用
+struct Ckpt {
+  FILE *f;
+  bool out;
+  void raw(void *p, size_t n) {
+    if ((out ? fwrite(p, 1, n, f) : fread(p, 1, n, f)) != n) { perror("断点"); exit(2); }
+  }
+  template <class T> void operator()(T &v) { raw(&v, sizeof v); }
+  template <class T> void seq(std::deque<T> &q) {
+    size_t n = q.size();
+    (*this)(n);
+    if (!out) q.resize(n);
+    for (auto &x : q) (*this)(x);
+  }
+};
 
 // MT48LC16M16A2：4 个 bank、13 位行、9 位列、16 位数据。只建功能，不查时序参数
 struct Sdram {
@@ -43,6 +66,10 @@ struct Sdram {
   uint16_t dq = 0;
   long reads = 0, writes = 0;
 
+  void ckpt(Ckpt &c) {
+    c.raw(mem.data(), mem.size() * sizeof mem[0]);
+    c(row), c(cl), c(bl), c(edge), c.seq(rd), c(wleft), c(wi), c(wbase), c(wcol), c(dq), c(reads), c(writes);
+  }
   uint32_t at(uint32_t base, uint32_t col, int i) const {
     return base | ((col & ~(uint32_t)(bl - 1)) | ((col + i) & (bl - 1)));
   }
@@ -90,6 +117,9 @@ struct Flash {
   bool sclk = false, miso = true;
   int n = 0, bit = 7;
   uint32_t sh = 0, addr = 0;
+
+  // 内容不进断点：恢复时照样用 +flash 给
+  void ckpt(Ckpt &c) { c(sclk), c(miso), c(n), c(bit), c(sh), c(addr); }
   void step(bool cs, bool ck, bool mosi) {
     if (cs) { n = 0, sclk = ck; return; }
     if (!sclk && ck) {
@@ -107,18 +137,20 @@ struct Flash {
 };
 
 struct Uart {
-  int div = 434;
+  int div = 434, pace = 0;
   // 收芯片发出来的
   bool last = true;
-  int rcnt = 0, rbit = -1, rsh = 0;
+  int rcnt = 0, rbit = -1, rsh = 0, high = 0;
   std::string seen;
   // 往芯片发
   std::deque<uint8_t> q;
-  int tcnt = 0, tbit = -1, tsh = 0;
+  int tcnt = 0, tbit = -1, tsh = 0, gap = 0;
   bool tx = true;
 
+  void ckpt(Ckpt &c) {
+    c(last), c(rcnt), c(rbit), c(rsh), c(high), c.seq(q), c(tcnt), c(tbit), c(tsh), c(gap), c(tx);
+  }
   // 复位那一段线上是低的，不是起始位：线连着高满一帧才开始认
-  int high = 0;
   bool recv(bool line, char &c) {
     bool got = false;
     if (high < 10 * div) {
@@ -134,19 +166,20 @@ struct Uart {
   }
   void send() {
     if (tbit < 0) {
+      if (gap) { --gap; return; }
       if (q.empty()) return;
       // 起始位、八位数据、两位停止位
       tsh = (q.front() << 1) | 0x600, q.pop_front(), tbit = 0, tcnt = div;
       tx = tsh & 1;
     } else if (--tcnt == 0) {
-      if (++tbit == 11) { tbit = -1, tx = true; return; }
+      if (++tbit == 11) { tbit = -1, tx = true, gap = pace; return; }
       tx = tsh >> tbit & 1, tcnt = div;
     }
   }
-  bool idle() const { return q.empty() && tbit < 0; }
+  bool idle() const { return q.empty() && tbit < 0 && !gap; }
 };
 
-struct Step { bool send; std::string text; };
+struct Step { char kind; std::string text; };
 
 static std::string unesc(const std::string &s) {
   std::string o;
@@ -178,7 +211,8 @@ int main(int argc, char **argv) {
   Flash flash;
   Uart uart;
   std::vector<Step> script;
-  uint64_t max = 50'000'000;
+  std::string restore;
+  uint64_t max = 50'000'000, beat = 0;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -190,13 +224,17 @@ int main(int argc, char **argv) {
       for (size_t k = 0; k < b.size() / 2; ++k) sdram.mem[k] |= b[2 * k] | b[2 * k + 1] << 8;
     }
     else if (auto v = val("+uartdiv=")) uart.div = atoi(v);
+    else if (auto v = val("+pace=")) uart.pace = atoi(v);
     else if (auto v = val("+max=")) max = strtoull(v, nullptr, 0);
+    else if (auto v = val("+beat=")) beat = strtoull(v, nullptr, 0);
+    else if (auto v = val("+restore=")) restore = v;
     else if (auto v = val("+script=")) {
       std::ifstream f(v);
       if (!f) { fprintf(stderr, "打不开 %s\n", v); return 2; }
       for (std::string l; std::getline(f, l);) {
-        if (l.rfind("expect ", 0) == 0) script.push_back({false, unesc(l.substr(7))});
-        else if (l.rfind("send ", 0) == 0) script.push_back({true, unesc(l.substr(5))});
+        if (l.rfind("expect ", 0) == 0) script.push_back({'e', unesc(l.substr(7))});
+        else if (l.rfind("send ", 0) == 0) script.push_back({'s', unesc(l.substr(5))});
+        else if (l.rfind("save ", 0) == 0) script.push_back({'c', l.substr(5)});
       }
     }
   }
@@ -205,12 +243,42 @@ int main(int argc, char **argv) {
   uint64_t in = 1ull << pad::UART_RX | 1ull << pad::SPI0_MISO | 1ull << pad::FLASH_MISO | 1ull << pad::SPI1_MISO;
   size_t at = 0, from = 0;
   uint64_t cyc = 0;
-  auto t0 = std::chrono::steady_clock::now();
   bool sending = false;
 
+  // 断点分两个文件：<名字> 是 Verilator 存的片内状态，<名字>.tb 是片外模型与测试台自己的
+  auto ckpt = [&](const std::string &name, bool out) {
+    Ckpt c{fopen((name + ".tb").c_str(), out ? "wb" : "rb"), out};
+    if (!c.f) { perror(name.c_str()); exit(2); }
+    sdram.ckpt(c), flash.ckpt(c), uart.ckpt(c), c(in), c(cyc);
+    fclose(c.f);
+    if (out) {
+      VerilatedSave os;
+      os.open(name.c_str());
+      os << *top;
+      os.close();
+    } else {
+      VerilatedRestore is;
+      is.open(name.c_str());
+      is >> *top;
+      is.close();
+    }
+    fprintf(stderr, "断点 %s：第 %llu 个周期%s\n", name.c_str(), (unsigned long long)cyc, out ? "存下" : "，从这里接着跑");
+  };
+
   top->rst_n = 0;
-  for (; cyc < max && at < script.size(); ++cyc) {
+  if (!restore.empty()) ckpt(restore, false);
+  uint64_t start = cyc;
+  auto t0 = std::chrono::steady_clock::now();
+  for (; cyc - start < max && at < script.size(); ++cyc) {
+    if (script[at].kind == 'c') {
+      ckpt(script[at].text, true);
+      ++at, from = uart.seen.size();
+      continue;
+    }
     if (cyc == 100) top->rst_n = 1;
+    if (beat && cyc && cyc % beat == 0)
+      fprintf(stderr, "[%llu 百万周期] SDRAM 读 %ld 写 %ld，串口收到 %zu 字，脚本 %zu/%zu\n",
+              (unsigned long long)(cyc / 1000000), sdram.reads, sdram.writes, uart.seen.size(), at, script.size());
     top->pad_in = in;
     top->clk = 1;
     top->eval();
@@ -225,7 +293,7 @@ int main(int argc, char **argv) {
     }
     uart.send();
 
-    if (script[at].send) {
+    if (script[at].kind == 's') {
       if (!sending) {
         for (char ch : script[at].text) uart.q.push_back(ch);
         sending = true, from = uart.seen.size();
@@ -246,9 +314,10 @@ int main(int argc, char **argv) {
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bool ok = at == script.size() && !script.empty();
-  fprintf(stderr, "\n%s：%llu 个周期，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
-          ok ? "过" : "没过", (unsigned long long)cyc, s, cyc / s / 1e3, sdram.reads, sdram.writes, at, script.size());
-  if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].send ? "send" : "expect", script[at].text.c_str());
+  fprintf(stderr, "\n%s：到第 %llu 个周期，这次跑了 %llu 个，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
+          ok ? "过" : "没过", (unsigned long long)cyc, (unsigned long long)(cyc - start), s, (cyc - start) / s / 1e3,
+          sdram.reads, sdram.writes, at, script.size());
+  if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].kind == 's' ? "send" : "expect", script[at].text.c_str());
   top->final();
   delete top;
   return ok ? 0 : 1;

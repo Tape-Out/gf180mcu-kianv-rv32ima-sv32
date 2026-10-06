@@ -6,6 +6,6 @@ H=$(cd "$(dirname "$0")" && pwd)
 D=$(realpath -m "$1")
 shift
 mkdir -p "$D"
-verilator --cc --exe --build -j 0 -O3 --x-assign fast --x-initial fast --noassert \
+verilator --cc --exe --build -j 0 -O3 --savable --x-assign fast --x-initial fast --noassert \
   -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD -Wno-BLKANDNBLK --top-module tb --Mdir "$D" -o Vtb \
   -CFLAGS "-O2 -std=c++17" "$@" "$H/tb.cpp" > "$D/build.log" 2>&1 || { tail -n 40 "$D/build.log"; exit 1; }
