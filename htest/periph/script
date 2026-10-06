@@ -1,0 +1,11 @@
+expect KianV periph
+expect gpio ok 00000000
+expect spi0 ok 00000000
+expect spi1 ok 00000000
+expect timer ok 80000007
+expect soft ok 80000003
+expect plic ok 0000000a
+expect reboot
+expect KianV periph
+expect rebooted
+expect done

@@ -2,9 +2,11 @@
 // 位次照上游 chip_core.sv；上游源码与流片交付的那份展平文件各包一层 tb，用的是同一份测试台。
 //
 //   +flash=<文件>@<偏移>   往 Flash 里放一段，可多次给
-//   +sdram=<文件>@<偏移>   直接写进 SDRAM，只给调试用
+//   +sdram=<文件>@<偏移>   直接放进 SDRAM，不经引导程序搬（riscv-tests 用，调试也用）
+//   +tohost=<地址>         盯 riscv-tests 的 tohost：写 1 算过，写别的数算不过；给了它就不必给脚本
 //   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过
 //   +restore=<文件>        从 save 存下的断点接着跑，脚本从头走
+//   +spiecho               两路 SPI 上各挂一个回声从设备；不给时 MISO 是高的，像没插卡、没接网卡
 //   +uartdiv=<n>           串口每位占几个时钟
 //   +pace=<n>              往芯片发的相邻两个字之间空几个时钟
 //   +max=<n>               最多跑几个时钟周期，到了还没走完算不过
@@ -29,7 +31,8 @@
 namespace pad {
 enum : int {
   UART_RX = 0, SPI0_MISO = 1, FLASH_MISO = 2, SPI1_MISO = 3,
-  UART_TX = 4, FLASH_CSN = 8, FLASH_SCLK = 9, FLASH_MOSI = 10,
+  UART_TX = 4, SPI0_CSN = 5, SPI0_SCLK = 6, SPI0_MOSI = 7, FLASH_CSN = 8, FLASH_SCLK = 9, FLASH_MOSI = 10,
+  SPI1_CSN = 11, SPI1_SCLK = 12, SPI1_MOSI = 13, GPIO = 53,
   SD_CKE = 15, SD_DQM = 16, SD_ADDR = 18, SD_BA = 31,
   SD_CSN = 33, SD_WEN = 34, SD_RASN = 35, SD_CASN = 36, SD_DQ = 37,
 };
@@ -65,6 +68,17 @@ struct Sdram {
   uint32_t wbase = 0, wcol = 0;
   uint16_t dq = 0;
   long reads = 0, writes = 0;
+  // riscv-tests 往 tohost 写结果：盯它的低半个字落在模型里的哪一格
+  long watch = -1;
+  bool hit = false;
+  uint16_t host = 0;
+
+  // 控制器把地址拆成 bank = addr[22:21]、行 = {addr[24:23], addr[20:10]}、列 = addr[9:1]，模型按 bank、行、列排。
+  // 给的是 SDRAM 里的字节偏移，回的是它在模型里的字节偏移
+  static uint32_t wire(uint32_t a) {
+    uint32_t blk = a >> 10, bank = blk >> 11 & 3, row = (blk >> 13 & 3) << 11 | (blk & 0x7ff);
+    return (bank << 13 | row) << 10 | (a & 0x3ff);
+  }
 
   void ckpt(Ckpt &c) {
     c.raw(mem.data(), mem.size() * sizeof mem[0]);
@@ -78,6 +92,7 @@ struct Sdram {
     uint16_t &w = mem[at(wbase, wcol, wi)];
     if (!(m & 1)) w = (w & 0xff00) | (d & 0x00ff);
     if (!(m & 2)) w = (w & 0x00ff) | (d & 0xff00);
+    if ((long)at(wbase, wcol, wi) == watch && !(m & 1)) hit = true, host = w;
     ++wi, --wleft, ++writes;
   }
   // sdram_clk 的上升沿调一次，out 是这一沿上芯片驱动的引脚
@@ -131,6 +146,26 @@ struct Flash {
       }
     } else if (sclk && !ck && n == 32) {
       miso = mem[addr] >> bit & 1;
+    }
+    sclk = ck;
+  }
+};
+
+// 回声从设备，SPI 模式 0：片选期间头一个字节回 ff，之后每个字节回上一个字节的反码；片选一抬就忘。
+// 回得对，说明片选、时钟、MOSI、MISO 四根线与字节的位次都对
+struct Echo {
+  bool sclk = false, miso = true;
+  int n = 0;
+  uint8_t sh = 0, out = 0xff;
+
+  void ckpt(Ckpt &c) { c(sclk), c(miso), c(n), c(sh), c(out); }
+  void step(bool cs, bool ck, bool mosi) {
+    if (cs) { n = 0, out = 0xff, miso = true, sclk = ck; return; }
+    if (!sclk && ck) {
+      sh = sh << 1 | mosi;
+      if (++n == 8) n = 0, out = ~sh;
+    } else if (sclk && !ck) {
+      miso = out >> (7 - n) & 1;
     }
     sclk = ck;
   }
@@ -210,6 +245,8 @@ int main(int argc, char **argv) {
   Sdram sdram;
   Flash flash;
   Uart uart;
+  Echo sd, net;
+  bool spiecho = false;
   std::vector<Step> script;
   std::string restore;
   uint64_t max = 50'000'000, beat = 0;
@@ -221,8 +258,13 @@ int main(int argc, char **argv) {
     else if (auto v = val("+sdram=")) {
       std::vector<uint8_t> b(32u << 20);
       if (!load(b, v)) return 2;
-      for (size_t k = 0; k < b.size() / 2; ++k) sdram.mem[k] |= b[2 * k] | b[2 * k + 1] << 8;
+      for (size_t k = 0; k < b.size(); ++k) {
+        uint32_t m = Sdram::wire(k);
+        sdram.mem[m >> 1] |= b[k] << (m & 1 ? 8 : 0);
+      }
     }
+    else if (a == "+spiecho") spiecho = true;
+    else if (auto v = val("+tohost=")) sdram.watch = Sdram::wire(strtoul(v, nullptr, 0) - 0x80000000u) >> 1;
     else if (auto v = val("+uartdiv=")) uart.div = atoi(v);
     else if (auto v = val("+pace=")) uart.pace = atoi(v);
     else if (auto v = val("+max=")) max = strtoull(v, nullptr, 0);
@@ -249,7 +291,7 @@ int main(int argc, char **argv) {
   auto ckpt = [&](const std::string &name, bool out) {
     Ckpt c{fopen((name + ".tb").c_str(), out ? "wb" : "rb"), out};
     if (!c.f) { perror(name.c_str()); exit(2); }
-    sdram.ckpt(c), flash.ckpt(c), uart.ckpt(c), c(in), c(cyc);
+    sdram.ckpt(c), flash.ckpt(c), uart.ckpt(c), sd.ckpt(c), net.ckpt(c), c(in), c(cyc);
     fclose(c.f);
     if (out) {
       VerilatedSave os;
@@ -269,8 +311,9 @@ int main(int argc, char **argv) {
   if (!restore.empty()) ckpt(restore, false);
   uint64_t start = cyc;
   auto t0 = std::chrono::steady_clock::now();
-  for (; cyc - start < max && at < script.size(); ++cyc) {
-    if (script[at].kind == 'c') {
+  auto waiting = [&] { return at < script.size() || (sdram.watch >= 0 && !sdram.hit); };
+  for (; cyc - start < max && waiting(); ++cyc) {
+    if (at < script.size() && script[at].kind == 'c') {
       ckpt(script[at].text, true);
       ++at, from = uart.seen.size();
       continue;
@@ -285,6 +328,12 @@ int main(int argc, char **argv) {
     uint64_t out = top->pad_out;
 
     flash.step(bits(out, pad::FLASH_CSN, 1), bits(out, pad::FLASH_SCLK, 1), bits(out, pad::FLASH_MOSI, 1));
+    if (spiecho) {
+      sd.step(bits(out, pad::SPI0_CSN, 1), bits(out, pad::SPI0_SCLK, 1), bits(out, pad::SPI0_MOSI, 1));
+      net.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
+    }
+    // GPIO 脚上有上拉；芯片驱动时读回的是它自己驱动的电平
+    bool gpio = bits(top->pad_oe, pad::GPIO, 1) ? bits(out, pad::GPIO, 1) : 1;
     char c;
     if (uart.recv(bits(out, pad::UART_TX, 1), c)) {
       putchar(c);
@@ -293,7 +342,8 @@ int main(int argc, char **argv) {
     }
     uart.send();
 
-    if (script[at].kind == 's') {
+    if (at >= script.size()) {
+    } else if (script[at].kind == 's') {
       if (!sending) {
         for (char ch : script[at].text) uart.q.push_back(ch);
         sending = true, from = uart.seen.size();
@@ -302,8 +352,11 @@ int main(int argc, char **argv) {
       ++at, from = uart.seen.size();
     }
 
-    in = (in & ~(1ull << pad::UART_RX | 1ull << pad::FLASH_MISO)) |
-         (uint64_t)uart.tx << pad::UART_RX | (uint64_t)flash.miso << pad::FLASH_MISO;
+    in = (in & ~(1ull << pad::UART_RX | 1ull << pad::FLASH_MISO | 1ull << pad::SPI0_MISO | 1ull << pad::SPI1_MISO |
+                 1ull << pad::GPIO)) |
+         (uint64_t)uart.tx << pad::UART_RX | (uint64_t)flash.miso << pad::FLASH_MISO |
+         (uint64_t)(!spiecho || sd.miso) << pad::SPI0_MISO | (uint64_t)(!spiecho || net.miso) << pad::SPI1_MISO |
+         (uint64_t)gpio << pad::GPIO;
     top->pad_in = in;
     top->clk = 0;
     top->eval();
@@ -313,7 +366,9 @@ int main(int argc, char **argv) {
   }
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  bool ok = at == script.size() && !script.empty();
+  bool ok = sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty();
+  if (sdram.watch >= 0 && !sdram.hit) fprintf(stderr, "\n没等到程序写 tohost");
+  if (sdram.hit && sdram.host != 1) fprintf(stderr, "\ntohost 写的是 %u：第 %u 项不过", sdram.host, sdram.host >> 1);
   fprintf(stderr, "\n%s：到第 %llu 个周期，这次跑了 %llu 个，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
           ok ? "过" : "没过", (unsigned long long)cyc, (unsigned long long)(cyc - start), s, (cyc - start) / s / 1e3,
           sdram.reads, sdram.writes, at, script.size());

@@ -1,3 +1,6 @@
 [submodule "third_party/gf180mcu-kianv-rv32ima-sv32"]
 	path = third_party/gf180mcu-kianv-rv32ima-sv32
 	url = https://github.com/splinedrive/gf180mcu-kianv-rv32ima-sv32.git
+[submodule "third_party/riscv-tests"]
+	path = third_party/riscv-tests
+	url = https://github.com/riscv-software-src/riscv-tests.git

@@ -47,9 +47,34 @@ $ ran test gf180mcu-kianv-rv32ima-sv32
 
 ## Testing
 
-`htest/tb.cpp` is a Verilator test bench with pin-level models of what sits outside the chip: an MT48LC16M16A2 SDRAM, an SPI flash that answers the `0x03` read, and a UART at 115200. It hangs on a module `tb` with the pad bus, so the same bench runs upstream's source (`htest/tb_rtl.v`) and a flattened tape-out file wrapped the same way. A script of `expect` and `send` lines decides the result.
+`htest/tb.cpp` is a Verilator test bench with pin-level models of what sits outside the chip: an MT48LC16M16A2 SDRAM, an SPI flash that answers the `0x03` read, a UART at 115200, and with `+spiecho` an echo slave on each of the two SPI ports. The GPIO pad has a pull-up. It hangs on a module `tb` with the pad bus, so the same bench runs upstream's source (`htest/tb_rtl.v`) and a flattened tape-out file wrapped the same way. A script of `expect` and `send` lines decides the result.
 
-The `hello` task boots a bare-metal program from the flash at `0x2010_0000`: it sets the UART divider from the frequency register, writes and reads back 1024 words spread over 16 MiB, checks that byte and halfword stores leave their neighbours alone, and reports over the UART. It runs at every point of the matrix.
+The `hello` task boots a bare-metal program from the flash at `0x2010_0000`: it sets the UART divider from the frequency register, writes and reads back 1024 words spread over 16 MiB, checks that byte and halfword stores leave their neighbours alone, and reports over the UART. A second program, `htest/periph`, then goes through the peripherals: the GPIO driven both ways and released to the pull-up, four bytes exchanged with the echo slave on each SPI port across a re-asserted chip select, the timer interrupt, the UART's interrupt through the PLIC claimed as source 10, and a reboot through the reset register. Both run at every point of the matrix.
+
+The `isa` task runs the standard riscv-tests (`p` environment; rv32ui, um, ua, mi and si) on the whole SoC: each program is placed in the SDRAM model, the flash holds two instructions that jump to it, and the bench watches `tohost`. 79 run and 72 pass.
+
+Not run, because the core does not implement them: `amocas_w` and `amocas_d` (Zacas, not part of A), `ma_data` (misaligned accesses in hardware are optional), `pmpaddr` (no PMP) and `breakpoint` (no debug triggers; `tselect` does not exist).
+
+The following fail, and the run turns red if any of them ever passes:
+
+| Tests | Why |
+|:--:|:--:|
+| `rv32mi-p-illegal` | Never finishes. After software sets `mip.SSIP` the interrupt arrives with `mcause` 0 (the loop of two registers described under Patches), and `mtvec` keeps its mode bit although vectored dispatch is not implemented |
+| `rv32mi-p-instret_overflow` | There is no `minstret` or `mcycle`, only the read-only `instret` and `cycle` |
+| `rv32mi-p-ma_addr` | A misaligned `lhu` neither loads the right value nor traps cleanly; `lh` at the same address does |
+| `ma_fetch` of `rv32mi` and `rv32si` | A jump to a misaligned target reports the exception with `mepc`/`sepc` on the target; the unprivileged specification reports it on the jump |
+| `rv32mi-p-shamt` | A shift with `shamt[5]` set, a reserved encoding on RV32, executes; the test expects an illegal-instruction exception |
+| `rv32si-p-dirty` | With MPRV set, MPP at S and SUM clear, a store to a U page is not refused |
+
+## Patches
+
+The submodule is never edited. `htest/setup.sh` copies upstream's sources to `build/src` and applies what is under `patch/`; the black box is that tree.
+
+| Patch | What it fixes |
+|:--:|:--:|
+| `msip.patch` | `mip.MSIP` did not follow the CLINT's `msip` down, so a machine software interrupt was taken again forever once raised. One line: MSIP joins the bits that are re-read every cycle. Reported as [upstream #3](https://github.com/splinedrive/gf180mcu-kianv-rv32ima-sv32/issues/3) |
+
+Not fixed: `mip` passes through two registers in a loop, so a CSR write to one of its software-writable bits (SSIP) reaches only one of them. OpenSBI with Sstc and a single-hart Linux never write those bits.
 
 ## Limits
 

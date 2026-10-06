@@ -1,0 +1,11 @@
+--- a/src/kianv_harris_edition/interrupt_controller.v
++++ b/src/kianv_harris_edition/interrupt_controller.v
+@@ -69,7 +69,7 @@
+ 
+   always @(*) begin
+ 
+-    temp_mip = mip_current & ~(`MIP_MTIP_MASK | `MIP_MEIP_MASK | `XIP_SEIP_MASK | (
++    temp_mip = mip_current & ~(`MIP_MSIP_MASK | `MIP_MTIP_MASK | `MIP_MEIP_MASK | `XIP_SEIP_MASK | (
+     `CHECK_SSTC_CONDITIONS(menvcfgh, mcounteren)
+     << `XIP_STIP_BIT));
+ 

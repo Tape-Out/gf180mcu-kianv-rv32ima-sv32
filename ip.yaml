@@ -28,15 +28,17 @@ emit:
 - kind: foreign
   lang: sv
   top: chip_core
+  # 源码是上游原样加 patch/ 下的补丁，拼在 build/src
+  setup: src
   rtl:
-  - third_party/gf180mcu-kianv-rv32ima-sv32/src/chip_core.sv
+  - build/src/chip_core.sv
   # 缓存与它的 SRAM 包装也要列上：旁路之后没人例化它们，但 yosys 按默认参数查每个模块时要找得到
-  - { glob: "third_party/gf180mcu-kianv-rv32ima-sv32/src/*.v" }
-  - third_party/gf180mcu-kianv-rv32ima-sv32/src/sdram/mt48lc16m16a2_ctrl.v
-  - { glob: "third_party/gf180mcu-kianv-rv32ima-sv32/src/kianv_harris_edition/*.v" }
+  - { glob: "build/src/*.v" }
+  - build/src/sdram/mt48lc16m16a2_ctrl.v
+  - { glob: "build/src/kianv_harris_edition/*.v" }
   includes:
-  - third_party/gf180mcu-kianv-rv32ima-sv32/src
-  - third_party/gf180mcu-kianv-rv32ima-sv32/src/kianv_harris_edition
+  - build/src
+  - build/src/kianv_harris_edition
   # 上游的流片配置（librelane/config.yaml 的 VERILOG_DEFINES），缓存除外
   defines:
     SYSTEM_CLK: systemClk
@@ -77,12 +79,19 @@ emit:
   - 程序在片外 SPI Flash 里，复位后从 0x2010_0000 取指；主存是片外 16 位 SDRAM，片上没有存储
   - 串口波特率的分频值复位后是 1，要软件写 0x1000_000C 才出得了字
 tasks:
+  src:
+    desc: 拼源码树：上游的源码原样拷一份，套上 patch/ 下的补丁
+    run: bash htest/setup.sh
   hello:
-    desc: 测试台带片外的 SDRAM、Flash 与串口模型，从 Flash 起一段裸机程序，读写 SDRAM 后从串口报结果
+    desc: 测试台带片外的 SDRAM、Flash、串口与两路 SPI 的回声从设备，从 Flash 起两段裸机程序：读写 SDRAM；把 GPIO、SPI、计时器中断、PLIC、重启逐个点一遍
     run: bash htest/hello.sh {{out}} systemClk={{knob.systemClk}} itlbEntries={{knob.itlbEntries}} dtlbEntries={{knob.dtlbEntries}}
+  isa:
+    desc: 标准 riscv-tests 的 p 环境在整颗 SoC 上跑，rv32ui、um、ua、mi、si 逐个交叉编译，程序放进 SDRAM 模型，测试台盯 tohost
+    run: bash htest/isa.sh {{out}} systemClk={{knob.systemClk}} itlbEntries={{knob.itlbEntries}} dtlbEntries={{knob.dtlbEntries}}
 test:
   upstream:
   - { name: hello, task: hello, timeout: 1800 }
+  - { name: isa, task: isa, timeout: 3600 }
 targets:
   foreign:
     driver: foreign
