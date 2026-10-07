@@ -12,6 +12,7 @@
 //   +sdout=<文件>          跑完把卡里的内容写出来
 //   +w5500                 SPI1 上接一颗 W5500，网线那头是一台会应 ARP 与 ping 的主机 10.0.0.1
 //   +nicpipe=<目录>        同上，网线接到另一个仿真上（比如交换机与路由器的联合仿真），帧经这个目录里的两个文件来往
+//   +gpu                   SPI1 上接一整颗 to2610-gpu（它的管理口），它的 done 接 GPIO；仿真器要编进它（sim.sh 的 SIM_GPU）
 //   +uartdiv=<n>           串口每位占几个时钟
 //   +pace=<n>              往芯片发的相邻两个字之间空几个时钟
 //   +max=<n>               最多跑几个时钟周期，到了还没走完算不过
@@ -34,6 +35,9 @@
 #include "Vtb.h"
 #include "verilated.h"
 #include "verilated_save.h"
+#ifdef WITH_GPU
+#include "Vgpu.h"
+#endif
 
 namespace pad {
 enum : int {
@@ -615,6 +619,32 @@ static bool load(std::vector<uint8_t> &buf, const std::string &spec) {
   return true;
 }
 
+#ifdef WITH_GPU
+// 另一颗芯片的整份网表，与这颗同一个时钟。它的管理口在 payload 第 56 至 59 位，done 在第 60 位；
+// 管理口没被选中时 MISO 不驱动，板上有上拉。只在 +gpu 时步进，起 Linux 那一段不受它拖慢。
+struct Gpu {
+  Vgpu m;
+  int left = 16;
+  bool miso = true, done = false, cs = true;
+  long xfers = 0;
+  bool get(const VlWide<3> &v, int b) { return v[b >> 5] >> (b & 31) & 1; }
+  void put(int b, bool v) { m.io_in[b >> 5] = (m.io_in[b >> 5] & ~(1u << (b & 31))) | (uint32_t)v << (b & 31); }
+  void step(bool csn, bool sck, bool mosi) {
+    m.reset = left > 0;
+    if (left) --left;
+    xfers += cs && !csn;
+    cs = csn;
+    put(56, sck), put(57, csn), put(58, mosi);
+    m.clock = 1;
+    m.eval();
+    miso = !get(m.io_oe, 59) || get(m.io_out, 59);
+    done = get(m.io_out, 60);
+    m.clock = 0;
+    m.eval();
+  }
+};
+#endif
+
 int main(int argc, char **argv) {
   Verilated::commandArgs(argc, argv);
   Sdram sdram;
@@ -624,7 +654,10 @@ int main(int argc, char **argv) {
   SdCard card;
   W5500 nic;
   std::string sdout;
-  bool spiecho = false, hasnic = false;
+  bool spiecho = false, hasnic = false, hasgpu = false;
+#ifdef WITH_GPU
+  Gpu gpu;
+#endif
   std::vector<Step> script;
   std::vector<std::string> rejects;
   std::string hit;
@@ -653,6 +686,14 @@ int main(int argc, char **argv) {
     }
     else if (auto v = val("+sdout=")) sdout = v;
     else if (a == "+w5500") hasnic = true;
+    else if (a == "+gpu") {
+#ifdef WITH_GPU
+      hasgpu = true;
+#else
+      fprintf(stderr, "这个仿真器没有编进 to2610-gpu，编的时候给 SIM_GPU\n");
+      return 2;
+#endif
+    }
     else if (auto v = val("+nicpipe=")) hasnic = true, nic.pipe = v;
     else if (auto v = val("+tohost=")) sdram.watch = Sdram::wire(strtoul(v, nullptr, 0) - 0x80000000u) >> 1;
     else if (auto v = val("+uartdiv=")) uart.div = atoi(v);
@@ -729,8 +770,15 @@ int main(int argc, char **argv) {
       if (!nic.pipe.empty() && (cyc & 0xfff) == 0) nic.pump();
       nic.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
     }
-    // GPIO 脚上有上拉；芯片驱动时读回的是它自己驱动的电平
-    bool gpio = bits(top->pad_oe, pad::GPIO, 1) ? bits(out, pad::GPIO, 1) : 1;
+    bool gmiso = true, gdone = true;
+#ifdef WITH_GPU
+    if (hasgpu) {
+      gpu.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
+      gmiso = gpu.miso, gdone = gpu.done;
+    }
+#endif
+    // GPIO 脚上有上拉，接了 gpu 时是它的 done；芯片驱动时读回的是它自己驱动的电平
+    bool gpio = bits(top->pad_oe, pad::GPIO, 1) ? bits(out, pad::GPIO, 1) : gdone;
     char c;
     if (uart.recv(bits(out, pad::UART_TX, 1), c)) {
       putchar(c);
@@ -755,7 +803,7 @@ int main(int argc, char **argv) {
                  1ull << pad::GPIO)) |
          (uint64_t)uart.tx << pad::UART_RX | (uint64_t)flash.miso << pad::FLASH_MISO |
          (uint64_t)(hascard ? card.miso : !spiecho || sd.miso) << pad::SPI0_MISO |
-         (uint64_t)(hasnic ? nic.miso : !spiecho || net.miso) << pad::SPI1_MISO |
+         (uint64_t)(hasnic ? nic.miso : hasgpu ? gmiso : !spiecho || net.miso) << pad::SPI1_MISO |
          (uint64_t)gpio << pad::GPIO;
     top->pad_in = in;
     top->clk = 0;
@@ -775,6 +823,9 @@ int main(int argc, char **argv) {
   if (!card.mem.empty()) fprintf(stderr, "SD 卡读 %ld 块、写 %ld 块\n", card.reads, card.writes);
   if (hasnic) fprintf(stderr, "网卡发 %ld 帧、收 %ld 帧；那头的主机应 ARP %ld 次、回 ping %ld 次、答 DHCP %ld 次\n", nic.sent, nic.got,
                       nic.arps, nic.pings, nic.dhcps);
+#ifdef WITH_GPU
+  if (hasgpu) fprintf(stderr, "gpu 的管理口收到 %ld 次传输，done 停在 %d\n", gpu.xfers, gpu.done);
+#endif
   if (!sdout.empty()) std::ofstream(sdout, std::ios::binary).write((const char *)card.mem.data(), card.mem.size());
   if (!hit.empty()) fprintf(stderr, "撞上：reject %s\n", hit.c_str());
   else if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].kind == 's' ? "send" : "expect", script[at].text.c_str());
