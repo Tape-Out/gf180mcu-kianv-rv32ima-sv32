@@ -632,12 +632,16 @@ static bool load(std::vector<uint8_t> &buf, const std::string &spec) {
 // 管理口没被选中时 MISO 不驱动，板上有上拉。只在 +gpu 时步进，起 Linux 那一段不受它拖慢。
 struct Gpu {
   Vgpu m;
-  int left = 16;
-  bool miso = true, done = false, cs = true;
+  int left = 16, tail = 0;
+  bool miso = true, done = false, busy = false, cs = true;
   long xfers = 0;
   bool get(const VlWide<3> &v, int b) { return v[b >> 5] >> (b & 31) & 1; }
   void put(int b, bool v) { m.io_in[b >> 5] = (m.io_in[b >> 5] & ~(1u << (b & 31))) | (uint32_t)v << (b & 31); }
   void step(bool csn, bool sck, bool mosi) {
+    // 管理口闲着、内核也没在跑时它的状态不会变，不给它时钟：整颗 gpu 每拍都算，仿真慢十倍。
+    // 片选抬起之后再走 256 拍，让最后一个字写进去
+    tail = csn ? tail - (tail > 0) : 256;
+    if (!left && csn && !busy && !tail) return;
     m.reset = left > 0;
     if (left) --left;
     xfers += cs && !csn;
@@ -647,6 +651,7 @@ struct Gpu {
     m.eval();
     miso = !get(m.io_oe, 59) || get(m.io_out, 59);
     done = get(m.io_out, 60);
+    busy = get(m.io_out, 61);
     m.clock = 0;
     m.eval();
   }
