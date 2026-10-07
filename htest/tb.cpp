@@ -6,7 +6,9 @@
 //   +tohost=<地址>         盯 riscv-tests 的 tohost：写 1 算过，写别的数算不过；给了它就不必给脚本
 //   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过；
 //                          reject <文本> 不占次序，串口上一出现这段字就算不过，不必等到 +max
-//   +restore=<文件>        从 save 存下的断点接着跑，脚本从头走
+//   +restore=<文件>        从断点接着跑：save 存下的，脚本从头走；+stop 存下的，同一份脚本从停下的那一步接着走
+//   +stop=<n>@<文件>       这一次跑满 n 个周期就把断点存进文件、算过退出：一个作业放不下的启动分几个作业跑完；
+//                          写成 <n>s 是跑满 n 秒，托管机快慢不一，按时间分段才不会超时
 //   +spiecho               两路 SPI 上各挂一个回声从设备；不给时 MISO 是高的，像没插卡、没接网卡
 //   +sd=<镜像>             SPI0 上插一张 SD 卡，内容是这个文件（补齐到 512 KiB 的整数倍）
 //   +sdout=<文件>          跑完把卡里的内容写出来
@@ -64,6 +66,12 @@ struct Ckpt {
     (*this)(n);
     if (!out) q.resize(n);
     for (auto &x : q) (*this)(x);
+  }
+  void str(std::string &s) {
+    size_t n = s.size();
+    (*this)(n);
+    if (!out) s.resize(n);
+    raw(s.data(), n);
   }
 };
 
@@ -661,8 +669,9 @@ int main(int argc, char **argv) {
   std::vector<Step> script;
   std::vector<std::string> rejects;
   std::string hit;
-  std::string restore;
-  uint64_t max = 50'000'000, beat = 0;
+  std::string restore, stopfile;
+  uint64_t max = 50'000'000, beat = 0, stop = 0;
+  bool stopsec = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -701,6 +710,12 @@ int main(int argc, char **argv) {
     else if (auto v = val("+max=")) max = strtoull(v, nullptr, 0);
     else if (auto v = val("+beat=")) beat = strtoull(v, nullptr, 0);
     else if (auto v = val("+restore=")) restore = v;
+    else if (auto v = val("+stop=")) {
+      const char *at = strchr(v, '@');
+      if (!at) { fprintf(stderr, "+stop=<周期数或秒数 s>@<断点文件>\n"); return 2; }
+      char *end;
+      stop = strtoull(v, &end, 0), stopsec = *end == 's', stopfile = at + 1;
+    }
     else if (auto v = val("+script=")) {
       std::ifstream f(v);
       if (!f) { fprintf(stderr, "打不开 %s\n", v); return 2; }
@@ -718,12 +733,16 @@ int main(int argc, char **argv) {
   size_t at = 0, from = 0;
   uint64_t cyc = 0;
   bool sending = false;
+  // 断点存的是不是「同一份脚本接着走」：+stop 存的是，脚本里的 save 存的不是
+  uint8_t cont = 0;
 
   // 断点分两个文件：<名字> 是 Verilator 存的片内状态，<名字>.tb 是片外模型与测试台自己的
   auto ckpt = [&](const std::string &name, bool out) {
     Ckpt c{fopen((name + ".tb").c_str(), out ? "wb" : "rb"), out};
     if (!c.f) { perror(name.c_str()); exit(2); }
     sdram.ckpt(c), flash.ckpt(c), uart.ckpt(c), sd.ckpt(c), net.ckpt(c), c(in), c(cyc);
+    c(cont), c(at), c(from), c(sending), c.str(uart.seen);
+    if (!out && !cont) at = from = 0, sending = false, uart.seen.clear();
     fclose(c.f);
     if (out) {
       VerilatedSave os;
@@ -736,16 +755,28 @@ int main(int argc, char **argv) {
       is >> *top;
       is.close();
     }
-    fprintf(stderr, "断点 %s：第 %llu 个周期%s\n", name.c_str(), (unsigned long long)cyc, out ? "存下" : "，从这里接着跑");
+    fprintf(stderr, "断点 %s：第 %llu 个周期%s%s\n", name.c_str(), (unsigned long long)cyc, out ? "存下" : "，从这里接着跑",
+            !out && cont ? "，脚本从停下的那一步接着走" : "");
   };
 
   top->rst_n = 0;
   if (!restore.empty()) ckpt(restore, false);
+  if (at > script.size()) { fprintf(stderr, "断点停在脚本第 %zu 步，这份脚本只有 %zu 步\n", at, script.size()); return 2; }
   uint64_t start = cyc;
+  bool stopped = false;
   auto t0 = std::chrono::steady_clock::now();
   auto waiting = [&] { return at < script.size() || (sdram.watch >= 0 && !sdram.hit); };
   for (; cyc - start < max && waiting() && hit.empty(); ++cyc) {
+    if (stop && (stopsec ? (cyc & 0xfffff) == 0 &&
+                               std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(stop)
+                         : cyc - start >= stop)) {
+      cont = 1;
+      ckpt(stopfile, true);
+      stopped = true;
+      break;
+    }
     if (at < script.size() && script[at].kind == 'c') {
+      cont = 0;
       ckpt(script[at].text, true);
       ++at, from = uart.seen.size();
       continue;
@@ -814,8 +845,11 @@ int main(int argc, char **argv) {
   }
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  bool ok = hit.empty() && (sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty());
-  if (sdram.watch >= 0 && !sdram.hit) fprintf(stderr, "\n没等到程序写 tohost");
+  bool ok = stopped || (hit.empty() && (sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty()));
+  if (stopped)
+    fprintf(stderr, "\n停在这里：脚本走到 %zu/%zu，断点 %s；同一份脚本加 +restore=%s 接着跑", at, script.size(), stopfile.c_str(),
+            stopfile.c_str());
+  if (sdram.watch >= 0 && !sdram.hit && !stopped) fprintf(stderr, "\n没等到程序写 tohost");
   if (sdram.hit && sdram.host != 1) fprintf(stderr, "\ntohost 写的是 %u：第 %u 项不过", sdram.host, sdram.host >> 1);
   fprintf(stderr, "\n%s：到第 %llu 个周期，这次跑了 %llu 个，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
           ok ? "过" : "没过", (unsigned long long)cyc, (unsigned long long)(cyc - start), s, (cyc - start) / s / 1e3,
