@@ -8,6 +8,10 @@
 //                          reject <文本> 不占次序，串口上一出现这段字就算不过，不必等到 +max
 //   +restore=<文件>        从 save 存下的断点接着跑，脚本从头走
 //   +spiecho               两路 SPI 上各挂一个回声从设备；不给时 MISO 是高的，像没插卡、没接网卡
+//   +sd=<镜像>             SPI0 上插一张 SD 卡，内容是这个文件（补齐到 512 KiB 的整数倍）
+//   +sdout=<文件>          跑完把卡里的内容写出来
+//   +w5500                 SPI1 上接一颗 W5500，网线那头是一台会应 ARP 与 ping 的主机 10.0.0.1
+//   +nicpipe=<目录>        同上，网线接到另一个仿真上（比如交换机与路由器的联合仿真），帧经这个目录里的两个文件来往
 //   +uartdiv=<n>           串口每位占几个时钟
 //   +pace=<n>              往芯片发的相邻两个字之间空几个时钟
 //   +max=<n>               最多跑几个时钟周期，到了还没走完算不过
@@ -15,6 +19,7 @@
 //
 // 断点是给 Linux 用的：起到 shell 要仿一个多小时，存一次，之后调命令从断点起。
 // 片上的串口接收缓冲只有 16 个字，内核又是按时钟节拍去取的，一口气发一整行会冲掉，所以要 +pace。
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +27,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -172,6 +178,374 @@ struct Echo {
   }
 };
 
+// SPI 模式的 SD 卡（SDHC，按块寻址），内容是 +sd 给的镜像。照 SD Physical Layer Simplified Specification
+// 第 7 章，认 Linux 的 mmc_spi 用到的那些命令：上电识别（CMD0、8、55 加 ACMD41、58、59），读寄存器
+// （CMD9、10、13，ACMD13、51，CMD6），读写单块与多块（CMD17、18、12、24、25，ACMD23），擦除（CMD32、33、38）。
+// 发出去的数据带 CRC16；主机发来的 CRC 不查。片选抬起只让出 MISO、重新对齐字节，卡里排着的应答不丢。
+// 卡的状态不进断点：卡是恢复之后才「插」上的
+struct SdCard {
+  std::vector<uint8_t> mem;
+  bool sclk = false, miso = true, sel = false;
+  int nbit = 0;
+  uint8_t sh = 0, cur = 0xff;
+  std::deque<uint8_t> out;
+  uint8_t cmd[6] = {};
+  int ncmd = 0;
+  bool idle = true, app = false;
+  int tries = 0;
+  // 写：0 不在写，1 等单块的令牌，2 等多块的令牌，3 在收一块
+  int wstate = 0;
+  uint32_t wblk = 0;
+  int wn = 0;
+  uint8_t wbuf[514] = {};
+  bool multi = false, rmulti = false;
+  uint32_t rblk = 0;
+  long reads = 0, writes = 0;
+
+  uint32_t blocks() const { return mem.size() / 512; }
+  static uint16_t crc16(const uint8_t *p, size_t n) {
+    uint16_t c = 0;
+    for (size_t i = 0; i < n; ++i) {
+      c ^= p[i] << 8;
+      for (int k = 0; k < 8; ++k) c = c & 0x8000 ? c << 1 ^ 0x1021 : c << 1;
+    }
+    return c;
+  }
+  static uint8_t crc7(const uint8_t *p, size_t n) {
+    uint8_t c = 0;
+    for (size_t i = 0; i < n; ++i)
+      for (int k = 7; k >= 0; --k) {
+        c <<= 1;
+        if ((p[i] >> k ^ c >> 7) & 1) c ^= 0x09;
+      }
+    return c << 1 | 1;
+  }
+  // 一个数据块：起始令牌、内容、CRC16
+  void block(const uint8_t *p, size_t n) {
+    out.push_back(0xfe);
+    out.insert(out.end(), p, p + n);
+    uint16_t c = crc16(p, n);
+    out.push_back(c >> 8), out.push_back(c & 0xff);
+  }
+  void reg(std::initializer_list<uint8_t> v) {
+    uint8_t r[16] = {};
+    std::copy(v.begin(), v.end(), r);
+    r[15] = crc7(r, 15);
+    block(r, 16);
+  }
+  void exec() {
+    int c = cmd[0] & 0x3f;
+    uint32_t arg = (uint32_t)cmd[1] << 24 | cmd[2] << 16 | cmd[3] << 8 | cmd[4];
+    bool acmd = app;
+    uint8_t r1 = idle;
+    app = false, rmulti = false;
+    // 应答之前隔一个字节；多块读到一半来的命令把没发完的那一块作废
+    out.clear();
+    out.push_back(0xff);
+    if (acmd) {
+      static const uint8_t zero[64] = {};
+      // SCR：SD 2.00，一线与四线
+      static const uint8_t scr[8] = {0x02, 0x35, 0x80};
+      switch (c) {
+        case 41:
+          if (++tries >= 2) idle = false;
+          out.push_back(idle);
+          break;
+        case 13: out.push_back(r1), out.push_back(0), out.push_back(0xff), block(zero, 64); break;
+        case 51: out.push_back(r1), out.push_back(0xff), block(scr, 8); break;
+        case 23: case 42: out.push_back(r1); break;
+        default: out.push_back(r1 | 0x04);
+      }
+      return;
+    }
+    switch (c) {
+      case 0: idle = true, tries = 0, wstate = 0, out.push_back(0x01); break;
+      case 8: out.push_back(r1), out.push_back(0), out.push_back(0), out.push_back(cmd[3] & 0x0f), out.push_back(cmd[4]); break;
+      case 9: {
+        // CSD 2.0：容量 =（C_SIZE + 1）× 512 KiB
+        uint32_t cs = mem.size() / (512 * 1024) - 1;
+        out.push_back(r1), out.push_back(0xff);
+        reg({0x40, 0x0e, 0x00, 0x32, 0x5b, 0x59, 0x00, (uint8_t)(cs >> 16 & 0x3f), (uint8_t)(cs >> 8), (uint8_t)cs,
+             0x7f, 0x80, 0x0a, 0x40, 0x00});
+        break;
+      }
+      case 10:
+        out.push_back(r1), out.push_back(0xff);
+        reg({0x74, 'T', 'O', '2', '6', '1', '0', 'S', 0x10, 0x26, 0x10, 0x00, 0x01, 0x01, 0xaa});
+        break;
+      case 12: out.push_back(r1); break;
+      case 13: out.push_back(r1), out.push_back(0); break;
+      case 16: out.push_back(arg == 512 ? r1 : r1 | 0x40); break;
+      case 17:
+        if (arg >= blocks()) { out.push_back(r1 | 0x40); break; }
+        out.push_back(r1), out.push_back(0xff), block(&mem[(size_t)arg * 512], 512), ++reads;
+        break;
+      case 18:
+        if (arg >= blocks()) { out.push_back(r1 | 0x40); break; }
+        out.push_back(r1), rmulti = true, rblk = arg;
+        break;
+      case 24: case 25:
+        if (arg >= blocks()) { out.push_back(r1 | 0x40); break; }
+        out.push_back(r1), wstate = c == 24 ? 1 : 2, wblk = arg;
+        break;
+      case 32: case 33: case 59: out.push_back(r1); break;
+      case 38: out.push_back(r1), out.push_back(0x00); break;
+      case 55: app = true, out.push_back(r1); break;
+      case 58: out.push_back(r1), out.push_back(idle ? 0x00 : 0xc0), out.push_back(0xff), out.push_back(0x80), out.push_back(0x00); break;
+      case 6: {
+        static const uint8_t st[64] = {};
+        out.push_back(r1), out.push_back(0xff), block(st, 64);
+        break;
+      }
+      default: out.push_back(r1 | 0x04);
+    }
+  }
+  void byte(uint8_t b) {
+    if (wstate == 3) {
+      wbuf[wn++] = b;
+      if (wn < 514) return;
+      if (wblk < blocks()) memcpy(&mem[(size_t)wblk * 512], wbuf, 512), ++writes;
+      ++wblk;
+      // 收下了，再忙两个字节
+      out.push_back(0x05), out.push_back(0x00), out.push_back(0x00);
+      wstate = multi ? 2 : 0;
+      return;
+    }
+    if (ncmd == 0 && wstate == 1 && b == 0xfe) { wstate = 3, multi = false, wn = 0; return; }
+    if (ncmd == 0 && wstate == 2 && b == 0xfc) { wstate = 3, multi = true, wn = 0; return; }
+    if (ncmd == 0 && wstate == 2 && b == 0xfd) { wstate = 0, out.push_back(0xff), out.push_back(0x00); return; }
+    if (ncmd == 0 && (b & 0xc0) != 0x40) return;
+    cmd[ncmd++] = b;
+    if (ncmd == 6) ncmd = 0, exec();
+  }
+  void step(bool cs, bool ck, bool mosi) {
+    if (cs) { nbit = 0, miso = true, sel = false, sclk = ck; return; }
+    if (!sel) sel = true, miso = cur >> 7;
+    if (!sclk && ck) {
+      sh = sh << 1 | mosi;
+      if (++nbit == 8) {
+        nbit = 0;
+        byte(sh);
+        if (out.empty() && rmulti && rblk < blocks())
+          out.push_back(0xff), block(&mem[(size_t)rblk * 512], 512), ++rblk, ++reads;
+        cur = 0xff;
+        if (!out.empty()) cur = out.front(), out.pop_front();
+      }
+    } else if (sclk && !ck) {
+      miso = cur >> (7 - nbit) & 1;
+    }
+    sclk = ck;
+  }
+};
+
+// SPI 网卡 W5500，只建 Linux 的 w5100 驱动用到的那一截：通用寄存器（复位、MAC、RTR、版本号）与 0 号套接字的
+// MACRAW 模式（OPEN、CLOSE、SEND、RECV，发送与接收缓冲各 16 KB）。SPI 帧照数据手册 2.2：两字节地址、一字节控制
+// （块号 7:3、写 2、OM 1:0 只认 00 变长），之后是数据，地址在块内自增。
+// 网线那头是一台主机 10.0.0.1：应 ARP，回 ping，当 DHCP 服务器。网卡状态不进断点，与 SD 卡一样是恢复之后才「插」上的
+struct W5500 {
+  uint8_t common[0x40] = {}, sock[0x30] = {};
+  std::vector<uint8_t> tx = std::vector<uint8_t>(16384), rx = std::vector<uint8_t>(16384);
+  bool sclk = false, miso = true, sel = false;
+  int nbit = 0, n = 0;
+  uint8_t sh = 0, cur = 0xff, ctl = 0;
+  uint16_t addr = 0;
+  long sent = 0, got = 0, arps = 0, pings = 0;
+  static constexpr uint8_t host_mac[6] = {0x02, 0x26, 0x10, 0x00, 0x00, 0x01};
+  static constexpr uint8_t host_ip[4] = {10, 0, 0, 1};
+
+  W5500() { reset(); }
+  void reset() {
+    memset(common, 0, sizeof common);
+    memset(sock, 0, sizeof sock);
+    common[0x19] = 0x07, common[0x1a] = 0xd0, common[0x1b] = 8, common[0x39] = 0x04, common[0x2e] = 0xbf;
+    sock[0x1e] = sock[0x1f] = 2;
+  }
+  uint16_t r16(int a) const { return sock[a] << 8 | sock[a + 1]; }
+  void w16(int a, uint16_t v) { sock[a] = v >> 8, sock[a + 1] = v & 0xff; }
+  void sync() {
+    w16(0x20, 16384 - (uint16_t)(r16(0x24) - r16(0x22)));
+    w16(0x26, (uint16_t)(r16(0x2a) - r16(0x28)));
+  }
+  // 网线接到另一个仿真上（+nicpipe=<目录>）：发出的帧追加进 <目录>/tx，对面送来的帧从 <目录>/rx 读，
+  // 每条记录是两字节长度（大端）加帧本身。两边各跑各的，只按帧对齐
+  std::string pipe;
+  long inoff = 0;
+  void put(const std::vector<uint8_t> &f) {
+    FILE *o = fopen((pipe + "/tx").c_str(), "ab");
+    if (!o) return;
+    uint8_t h[2] = {(uint8_t)(f.size() >> 8), (uint8_t)f.size()};
+    fwrite(h, 1, 2, o), fwrite(f.data(), 1, f.size(), o), fclose(o);
+  }
+  void pump() {
+    FILE *i = fopen((pipe + "/rx").c_str(), "rb");
+    if (!i) return;
+    fseek(i, 0, SEEK_END);
+    long end = ftell(i);
+    while (inoff + 2 <= end) {
+      uint8_t h[2];
+      fseek(i, inoff, SEEK_SET);
+      if (fread(h, 1, 2, i) != 2) break;
+      size_t n = h[0] << 8 | h[1];
+      if (inoff + 2 + (long)n > end) break;
+      std::vector<uint8_t> f(n);
+      if (fread(f.data(), 1, n, i) != n) break;
+      if (!deliver(f) && sock[0x03] == 0x42) break;
+      inoff += 2 + n;
+    }
+    fclose(i);
+  }
+  // 往接收缓冲里放一帧：两字节长度（连它自己）、帧本身；放不下回 false
+  bool deliver(const std::vector<uint8_t> &f) {
+    if (sock[0x03] != 0x42) return false;
+    uint16_t wr = r16(0x2a), used = wr - r16(0x28);
+    if (used + f.size() + 2 > 16384) return false;
+    uint16_t len = f.size() + 2;
+    rx[wr & 0x3fff] = len >> 8, rx[(wr + 1) & 0x3fff] = len & 0xff;
+    for (size_t i = 0; i < f.size(); ++i) rx[(wr + 2 + i) & 0x3fff] = f[i];
+    w16(0x2a, wr + len);
+    sock[0x02] |= 0x04, ++got;
+    sync();
+    return true;
+  }
+  static uint16_t csum(const uint8_t *p, size_t n) {
+    uint32_t s = 0;
+    for (size_t i = 0; i + 1 < n; i += 2) s += p[i] << 8 | p[i + 1];
+    if (n & 1) s += p[n - 1] << 8;
+    while (s >> 16) s = (s & 0xffff) + (s >> 16);
+    return ~s;
+  }
+  // DHCP 服务（RFC 2131）：DISCOVER 回 OFFER、REQUEST 回 ACK，租出去的总是 10.0.0.2，网关与服务器是自己
+  long dhcps = 0;
+  void dhcp(const std::vector<uint8_t> &f, size_t at) {
+    const uint8_t *q = &f[at];
+    size_t n = f.size() - at;
+    if (n < 244 || q[0] != 1 || q[236] != 0x63 || q[237] != 0x82 || q[238] != 0x53 || q[239] != 0x63) return;
+    int type = 0;
+    for (size_t i = 240; i + 1 < n && q[i] != 255;) {
+      if (q[i] == 0) { ++i; continue; }
+      if (q[i] == 53 && i + 2 < n) type = q[i + 2];
+      i += 2 + q[i + 1];
+    }
+    if (type != 1 && type != 3) return;
+    std::vector<uint8_t> d(300);
+    d[0] = 2, d[1] = 1, d[2] = 6;
+    memcpy(&d[4], q + 4, 4), memcpy(&d[10], q + 10, 2), memcpy(&d[28], q + 28, 16);
+    d[16] = 10, d[17] = 0, d[18] = 0, d[19] = 2;
+    memcpy(&d[20], host_ip, 4);
+    d[236] = 0x63, d[237] = 0x82, d[238] = 0x53, d[239] = 0x63;
+    const uint8_t opt[] = {53, 1, (uint8_t)(type == 1 ? 2 : 5), 54, 4, 10, 0, 0, 1, 1, 4, 255, 255, 255, 0,
+                           3, 4, 10, 0, 0, 1, 51, 4, 0, 0, 0x0e, 0x10, 255};
+    memcpy(&d[240], opt, sizeof opt);
+    std::vector<uint8_t> r(14 + 20 + 8 + d.size());
+    memset(&r[0], 0xff, 6), memcpy(&r[6], host_mac, 6), r[12] = 0x08, r[13] = 0x00;
+    uint8_t *ip = &r[14];
+    size_t tot = 20 + 8 + d.size();
+    ip[0] = 0x45, ip[2] = tot >> 8, ip[3] = tot & 0xff, ip[8] = 64, ip[9] = 17;
+    memcpy(ip + 12, host_ip, 4), memset(ip + 16, 0xff, 4);
+    uint16_t c = csum(ip, 20);
+    ip[10] = c >> 8, ip[11] = c & 0xff;
+    uint8_t *u = ip + 20;
+    u[1] = 67, u[3] = 68, u[4] = (8 + d.size()) >> 8, u[5] = (8 + d.size()) & 0xff;
+    memcpy(u + 8, d.data(), d.size());
+    ++dhcps, deliver(r);
+  }
+  // 那头的主机看到一帧
+  void host(const std::vector<uint8_t> &f) {
+    if (f.size() < 42) return;
+    if (f[12] == 0x08 && f[13] == 0x00 && f[23] == 17) {
+      size_t ihl = (f[14] & 15) * 4;
+      if (f.size() >= 14 + ihl + 8 && f[14 + ihl + 2] == 0 && f[14 + ihl + 3] == 67) {
+        dhcp(f, 14 + ihl + 8);
+        return;
+      }
+    }
+    bool to_me = !memcmp(&f[0], host_mac, 6) || (f[0] & f[1] & f[2] & f[3] & f[4] & f[5]) == 0xff;
+    if (!to_me) return;
+    std::vector<uint8_t> r(f);
+    memcpy(&r[0], &f[6], 6), memcpy(&r[6], host_mac, 6);
+    if (f[12] == 0x08 && f[13] == 0x06 && f[21] == 1 && !memcmp(&f[38], host_ip, 4)) {
+      r.resize(42);
+      r[21] = 2;
+      memcpy(&r[32], &f[22], 10), memcpy(&r[22], host_mac, 6), memcpy(&r[28], host_ip, 4);
+      ++arps, deliver(r);
+    } else if (f[12] == 0x08 && f[13] == 0x00 && f[23] == 1 && !memcmp(&f[30], host_ip, 4)) {
+      size_t ihl = (f[14] & 15) * 4, tot = f[16] << 8 | f[17];
+      if (14 + tot > f.size() || f[14 + ihl] != 8) return;
+      r.resize(14 + tot);
+      memcpy(&r[26], &f[30], 4), memcpy(&r[30], &f[26], 4);
+      r[24] = r[25] = 0;
+      uint16_t c = csum(&r[14], ihl);
+      r[24] = c >> 8, r[25] = c & 0xff;
+      r[14 + ihl] = 0, r[16 + ihl] = r[17 + ihl] = 0;
+      c = csum(&r[14 + ihl], tot - ihl);
+      r[16 + ihl] = c >> 8, r[17 + ihl] = c & 0xff;
+      ++pings, deliver(r);
+    }
+  }
+  void command(uint8_t c) {
+    switch (c) {
+      case 0x01:
+        sock[0x03] = (sock[0x00] & 0x0f) == 0x04 ? 0x42 : 0x13;
+        w16(0x22, 0), w16(0x24, 0), w16(0x28, 0), w16(0x2a, 0);
+        break;
+      case 0x10: sock[0x03] = 0x00; break;
+      case 0x20: {
+        uint16_t rd = r16(0x22), wr = r16(0x24);
+        std::vector<uint8_t> f;
+        for (uint16_t i = rd; i != wr; ++i) f.push_back(tx[i & 0x3fff]);
+        w16(0x22, wr);
+        sock[0x02] |= 0x10, ++sent;
+        if (pipe.empty()) host(f);
+        else put(f);
+        break;
+      }
+      default: break;
+    }
+    sock[0x01] = 0;
+    sync();
+  }
+  uint8_t rd(int blk, uint16_t a) const {
+    switch (blk) {
+      case 0: return a < sizeof common ? common[a] : 0;
+      case 1: return a < sizeof sock ? sock[a] : 0;
+      case 2: return tx[a & 0x3fff];
+      case 3: return rx[a & 0x3fff];
+      default: return 0;
+    }
+  }
+  void wr(int blk, uint16_t a, uint8_t v) {
+    if (blk == 0 && a == 0 && (v & 0x80)) { reset(); return; }
+    if (blk == 0 && a < sizeof common) common[a] = v;
+    else if (blk == 1 && a == 0x01) command(v);
+    else if (blk == 1 && a == 0x02) sock[0x02] &= ~v;
+    else if (blk == 1 && a < sizeof sock && a != 0x03 && a != 0x20 && a != 0x21 && a != 0x26 && a != 0x27) {
+      sock[a] = v;
+      if (a == 0x25 || a == 0x29) sync();
+    } else if (blk == 2) tx[a & 0x3fff] = v;
+  }
+  void step(bool cs, bool ck, bool mosi) {
+    if (cs) { nbit = 0, n = 0, miso = true, sel = false, sclk = ck; return; }
+    if (!sel) sel = true, cur = 0xff;
+    if (!sclk && ck) {
+      sh = sh << 1 | mosi;
+      if (++nbit == 8) {
+        nbit = 0;
+        int blk = ctl >> 3;
+        if (n == 0) addr = sh << 8;
+        else if (n == 1) addr |= sh;
+        else if (n == 2) ctl = sh;
+        else if (ctl & 4) wr(blk, addr++, sh);
+        else addr++;
+        ++n;
+        cur = n >= 3 && !(ctl & 4) ? rd(ctl >> 3, addr) : 0xff;
+      }
+    } else if (sclk && !ck) {
+      miso = cur >> (7 - nbit) & 1;
+    }
+    sclk = ck;
+  }
+};
+
 struct Uart {
   int div = 434, pace = 0;
   // 收芯片发出来的
@@ -247,7 +621,10 @@ int main(int argc, char **argv) {
   Flash flash;
   Uart uart;
   Echo sd, net;
-  bool spiecho = false;
+  SdCard card;
+  W5500 nic;
+  std::string sdout;
+  bool spiecho = false, hasnic = false;
   std::vector<Step> script;
   std::vector<std::string> rejects;
   std::string hit;
@@ -267,6 +644,16 @@ int main(int argc, char **argv) {
       }
     }
     else if (a == "+spiecho") spiecho = true;
+    else if (auto v = val("+sd=")) {
+      std::ifstream f(v, std::ios::binary);
+      if (!f) { fprintf(stderr, "打不开 %s\n", v); return 2; }
+      card.mem.assign((std::istreambuf_iterator<char>(f)), {});
+      card.mem.resize((card.mem.size() + 0x7ffff) & ~(size_t)0x7ffff);
+      fprintf(stderr, "SD 卡：%s，%u 块\n", v, card.blocks());
+    }
+    else if (auto v = val("+sdout=")) sdout = v;
+    else if (a == "+w5500") hasnic = true;
+    else if (auto v = val("+nicpipe=")) hasnic = true, nic.pipe = v;
     else if (auto v = val("+tohost=")) sdram.watch = Sdram::wire(strtoul(v, nullptr, 0) - 0x80000000u) >> 1;
     else if (auto v = val("+uartdiv=")) uart.div = atoi(v);
     else if (auto v = val("+pace=")) uart.pace = atoi(v);
@@ -332,9 +719,15 @@ int main(int argc, char **argv) {
     uint64_t out = top->pad_out;
 
     flash.step(bits(out, pad::FLASH_CSN, 1), bits(out, pad::FLASH_SCLK, 1), bits(out, pad::FLASH_MOSI, 1));
+    bool hascard = !card.mem.empty();
+    if (hascard) card.step(bits(out, pad::SPI0_CSN, 1), bits(out, pad::SPI0_SCLK, 1), bits(out, pad::SPI0_MOSI, 1));
     if (spiecho) {
-      sd.step(bits(out, pad::SPI0_CSN, 1), bits(out, pad::SPI0_SCLK, 1), bits(out, pad::SPI0_MOSI, 1));
-      net.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
+      if (!hascard) sd.step(bits(out, pad::SPI0_CSN, 1), bits(out, pad::SPI0_SCLK, 1), bits(out, pad::SPI0_MOSI, 1));
+      if (!hasnic) net.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
+    }
+    if (hasnic) {
+      if (!nic.pipe.empty() && (cyc & 0xfff) == 0) nic.pump();
+      nic.step(bits(out, pad::SPI1_CSN, 1), bits(out, pad::SPI1_SCLK, 1), bits(out, pad::SPI1_MOSI, 1));
     }
     // GPIO 脚上有上拉；芯片驱动时读回的是它自己驱动的电平
     bool gpio = bits(top->pad_oe, pad::GPIO, 1) ? bits(out, pad::GPIO, 1) : 1;
@@ -361,7 +754,8 @@ int main(int argc, char **argv) {
     in = (in & ~(1ull << pad::UART_RX | 1ull << pad::FLASH_MISO | 1ull << pad::SPI0_MISO | 1ull << pad::SPI1_MISO |
                  1ull << pad::GPIO)) |
          (uint64_t)uart.tx << pad::UART_RX | (uint64_t)flash.miso << pad::FLASH_MISO |
-         (uint64_t)(!spiecho || sd.miso) << pad::SPI0_MISO | (uint64_t)(!spiecho || net.miso) << pad::SPI1_MISO |
+         (uint64_t)(hascard ? card.miso : !spiecho || sd.miso) << pad::SPI0_MISO |
+         (uint64_t)(hasnic ? nic.miso : !spiecho || net.miso) << pad::SPI1_MISO |
          (uint64_t)gpio << pad::GPIO;
     top->pad_in = in;
     top->clk = 0;
@@ -378,6 +772,10 @@ int main(int argc, char **argv) {
   fprintf(stderr, "\n%s：到第 %llu 个周期，这次跑了 %llu 个，%.0f 秒，每秒 %.0f 千周期；SDRAM 读 %ld 写 %ld；脚本走到 %zu/%zu\n",
           ok ? "过" : "没过", (unsigned long long)cyc, (unsigned long long)(cyc - start), s, (cyc - start) / s / 1e3,
           sdram.reads, sdram.writes, at, script.size());
+  if (!card.mem.empty()) fprintf(stderr, "SD 卡读 %ld 块、写 %ld 块\n", card.reads, card.writes);
+  if (hasnic) fprintf(stderr, "网卡发 %ld 帧、收 %ld 帧；那头的主机应 ARP %ld 次、回 ping %ld 次、答 DHCP %ld 次\n", nic.sent, nic.got,
+                      nic.arps, nic.pings, nic.dhcps);
+  if (!sdout.empty()) std::ofstream(sdout, std::ios::binary).write((const char *)card.mem.data(), card.mem.size());
   if (!hit.empty()) fprintf(stderr, "撞上：reject %s\n", hit.c_str());
   else if (!ok && at < script.size()) fprintf(stderr, "卡在：%s %s\n", script[at].kind == 's' ? "send" : "expect", script[at].text.c_str());
   top->final();
