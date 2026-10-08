@@ -88,10 +88,14 @@ tasks:
   isa:
     desc: 标准 riscv-tests 的 p 环境在整颗 SoC 上跑，rv32ui、um、ua、mi、si 逐个交叉编译，程序放进 SDRAM 模型，测试台盯 tohost
     run: bash htest/isa.sh {{out}} systemClk={{knob.systemClk}} itlbEntries={{knob.itlbEntries}} dtlbEntries={{knob.dtlbEntries}}
+  arch-test:
+    desc: riscv-arch-test（ACT4）的非特权部分在整颗 SoC 上跑，71 个自检程序放进 SDRAM 模型，测试台盯 tohost；程序包钉在 htest/arch-test.pin
+    run: bash htest/arch-test.sh {{out}} systemClk={{knob.systemClk}} itlbEntries={{knob.itlbEntries}} dtlbEntries={{knob.dtlbEntries}}
 test:
   upstream:
   - { name: hello, task: hello, timeout: 1800 }
   - { name: isa, task: isa, timeout: 3600 }
+  - { name: arch-test, task: arch-test, timeout: 3600 }
 targets:
   foreign:
     driver: foreign

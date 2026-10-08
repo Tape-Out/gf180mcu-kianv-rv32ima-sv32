@@ -1,0 +1,21 @@
+diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
+--- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:51.791399852 +0900
++++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:51.851399833 +0900
+@@ -436,7 +436,7 @@
+         `CSR_MIE:           mie_nxt = wdata_nxt;
+         `CSR_MIP:           mip_nxt = wdata_nxt;
+         `CSR_MTVEC:         mtvec_nxt = wdata_nxt;
+-        `CSR_MEPC:          mepc_nxt = wdata_nxt;
++        `CSR_MEPC:          mepc_nxt = {wdata_nxt[31:2], 2'b00};
+         `CSR_MCAUSE:        mcause_nxt = wdata_nxt;
+         `CSR_MTVAL:         mtval_nxt = wdata_nxt;
+         `CSR_MENVCFG:       menvcfg_nxt = wdata_nxt;
+@@ -461,7 +461,7 @@
+           mip_nxt = temp_restricted | (wdata_nxt & `SIP_MASK);
+         end
+         `CSR_STVEC:         stvec_nxt = wdata_nxt;
+-        `CSR_SEPC:          sepc_nxt = wdata_nxt;
++        `CSR_SEPC:          sepc_nxt = {wdata_nxt[31:2], 2'b00};
+         `CSR_SCAUSE:        scause_nxt = wdata_nxt;
+         `CSR_STVAL:         stval_nxt = wdata_nxt;
+         `CSR_SATP: begin

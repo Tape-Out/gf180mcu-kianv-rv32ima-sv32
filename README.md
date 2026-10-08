@@ -51,20 +51,11 @@ $ ran test gf180mcu-kianv-rv32ima-sv32
 
 The `hello` task boots a bare-metal program from the flash at `0x2010_0000`: it sets the UART divider from the frequency register, writes and reads back 1024 words spread over 16 MiB, checks that byte and halfword stores leave their neighbours alone, and reports over the UART. A second program, `htest/periph`, then goes through the peripherals: the GPIO driven both ways and released to the pull-up, four bytes exchanged with the echo slave on each SPI port across a re-asserted chip select, the timer interrupt, the UART's interrupt through the PLIC claimed as source 10, and a reboot through the reset register. Both run at every point of the matrix.
 
-The `isa` task runs the standard riscv-tests (`p` environment; rv32ui, um, ua, mi and si) on the whole SoC: each program is placed in the SDRAM model, the flash holds two instructions that jump to it, and the bench watches `tohost`. 79 run and 72 pass.
+The `isa` task runs the standard riscv-tests (`p` environment; rv32ui, um, ua, mi and si) on the whole SoC: each program is placed in the SDRAM model, the flash holds two instructions that jump to it, and the bench watches `tohost`. All 79 that apply pass.
 
 Not run, because the core does not implement them: `amocas_w` and `amocas_d` (Zacas, not part of A), `ma_data` (misaligned accesses in hardware are optional), `pmpaddr` (no PMP) and `breakpoint` (no debug triggers; `tselect` does not exist).
 
-The following fail, and the run turns red if any of them ever passes:
-
-| Tests | Why |
-|:--:|:--:|
-| `rv32mi-p-illegal` | Never finishes. After software sets `mip.SSIP` the interrupt arrives with `mcause` 0 (the loop of two registers described under Patches), and `mtvec` keeps its mode bit although vectored dispatch is not implemented |
-| `rv32mi-p-instret_overflow` | There is no `minstret` or `mcycle`, only the read-only `instret` and `cycle` |
-| `rv32mi-p-ma_addr` | A misaligned `lhu` neither loads the right value nor traps cleanly; `lh` at the same address does |
-| `ma_fetch` of `rv32mi` and `rv32si` | A jump to a misaligned target reports the exception with `mepc`/`sepc` on the target; the unprivileged specification reports it on the jump |
-| `rv32mi-p-shamt` | A shift with `shamt[5]` set, a reserved encoding on RV32, executes; the test expects an illegal-instruction exception |
-| `rv32si-p-dirty` | With MPRV set, MPP at S and SUM clear, a store to a U page is not refused |
+The `arch-test` task runs the unprivileged part of riscv-arch-test (ACT4) the same way: 71 self-checking programs for I, M, Zmmul, Zaamo, Zalrsc, Zicsr, Zifencei and Zicntr, all of which pass. The expected values come from the Sail model and are compiled into each program, which writes 1 or 3 to `tohost` and prints the mismatching register on the UART when it fails. `htest/arch-test/kianv-rv32ima/` is the configuration, derived from ACT4's `sail-RVI20U32` (no F, D, C or Zihpm; 32 MiB of RAM; output through the on-chip UART). `htest/arch-test/build.sh` compiles the programs; ACT4 draws fresh random operands on every build, so the pack is published once and pinned by digest in `htest/arch-test.pin`.
 
 ## Patches
 
@@ -73,8 +64,18 @@ The submodule is never edited. `htest/setup.sh` copies upstream's sources to `bu
 | Patch | What it fixes |
 |:--:|:--:|
 | `msip.patch` | `mip.MSIP` did not follow the CLINT's `msip` down, so a machine software interrupt was taken again forever once raised. One line: MSIP joins the bits that are re-read every cycle. Reported as [upstream #3](https://github.com/splinedrive/gf180mcu-kianv-rv32ima-sv32/issues/3) |
-
-Not fixed: `mip` passes through two registers in a loop, so a CSR write to one of its software-writable bits (SSIP) reaches only one of them. OpenSBI with Sstc and a single-hart Linux never write those bits.
+| `mepc.patch` | `mepc` and `sepc` kept the two low bits software wrote; without C they read as zero |
+| `jalr.patch` | `jalr` did not clear bit 0 of its target, so a target with that bit set trapped as misaligned. The next PC now always has bit 0 clear; every other target is even anyway, and `mret`/`sret` take another path |
+| `lrsc.patch` | The reservation was a single bit, so after `lr.w` to one word and `lr.w` to another, `sc.w` to the first still succeeded. `lr.w` now also records the address and `sc.w` succeeds only on the same address |
+| `lhu.patch` | A misaligned `lhu` neither loaded the right value nor trapped; it now raises a load-address-misaligned exception, as `lh` does |
+| `shamt.patch` | A shift immediate with bit 5 set, reserved on RV32, executed; it now raises an illegal-instruction exception |
+| `mafetch.patch` | A jump to a misaligned target wrote its link register, and the write-back state's prefetch of that target went out, so the handler's first instruction decoded the stale word. The link is no longer written and the prefetch is withheld |
+| `mtval.patch` | On an illegal instruction `mtval` held only the opcode; it now holds the whole instruction |
+| `mip.patch` | `mip` passed through two registers in a loop, so a CSR write to SSIP reached only one of them; the interrupt controller's copy is now combinational. Vectored `mtvec` also sent exceptions to base + 4 × cause; only interrupts are vectored now |
+| `counters.patch` | `mcycle` and `minstret` did not exist. They are writable, the instruction that writes `minstret` is not counted, and `mcountinhibit` stops both |
+| `tvm.patch` | With `mstatus.TVM` set, S-mode access to `satp` did not trap |
+| `adbits.patch` | Translation ignored the A and D bits. A page with A clear, or a store to a page with D clear, now raises a page fault and software sets them (Svade) |
+| `ptw.patch` | A superpage with nonzero low PPN bits was used with them masked, and a pointer at the last level was walked one level further; both now raise a page fault |
 
 ## Limits
 

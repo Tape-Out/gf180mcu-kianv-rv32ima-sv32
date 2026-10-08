@@ -1,0 +1,13 @@
+diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
+--- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.315399679 +0900
++++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.343399669 +0900
+@@ -67,7 +67,8 @@
+   assign csr_privilege_level = CSRAddr[9:8];
+   wire csr_read_only;
+   assign csr_read_only = (CSRAddr[11:10] == 2'b11);
+-  assign csr_access_fault = (privilege_mode < csr_privilege_level) || (we & csr_read_only) || csr_not_exist;
++  wire satp_trapped = CSRAddr == `CSR_SATP && `IS_SUPERVISOR(privilege_mode) && `GET_MSTATUS_TVM(mstatus);
++  assign csr_access_fault = (privilege_mode < csr_privilege_level) || (we & csr_read_only) || csr_not_exist || satp_trapped;
+ 
+   wire csr_write_valid;
+   assign csr_write_valid = we && !csr_access_fault;

@@ -1,0 +1,14 @@
+diff -ruN a/src/kianv_harris_edition/sv32_table_walk.v b/src/kianv_harris_edition/sv32_table_walk.v
+--- a/src/kianv_harris_edition/sv32_table_walk.v	2026-10-08 23:18:52.423399644 +0900
++++ b/src/kianv_harris_edition/sv32_table_walk.v	2026-10-08 23:18:52.455399632 +0900
+@@ -246,7 +246,9 @@
+           flags_tmp      = walk_mem_rdata & `PTE_FLAGS;
+           vpn_concat_tmp = address >> `SV32_PAGE_OFFSET_BITS;
+ 
+-          if (!`GET_PTE_V(walk_mem_rdata)) begin
++          if (!`GET_PTE_V(walk_mem_rdata)
++              || (level == 2'd0 && !(`GET_PTE_R(walk_mem_rdata) || `GET_PTE_X(walk_mem_rdata)))
++              || (level != 2'd0 && (`GET_PTE_R(walk_mem_rdata) || `GET_PTE_X(walk_mem_rdata)) && ppn_tmp[9:0] != 10'd0)) begin
+ 
+             pte_nxt   = 32'd0;
+             ready_nxt = 1'b1;

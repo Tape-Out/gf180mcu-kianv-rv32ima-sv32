@@ -1,0 +1,15 @@
+diff -ruN a/src/kianv_harris_edition/load_decoder.v b/src/kianv_harris_edition/load_decoder.v
+--- a/src/kianv_harris_edition/load_decoder.v	2026-10-08 23:18:51.987399787 +0900
++++ b/src/kianv_harris_edition/load_decoder.v	2026-10-08 23:18:52.019399778 +0900
+@@ -40,7 +40,10 @@
+       case (1'b1)
+         is_lb:  LOADop = `LOAD_OP_LB;
+         is_lbu: LOADop = `LOAD_OP_LBU;
+-        is_lhu: LOADop = `LOAD_OP_LHU;
++        is_lhu: begin
++          LOADop = `LOAD_OP_LHU;
++          is_load_unaligned = addr_align_bits[0];
++        end
+ 
+         is_lh: begin
+           LOADop = `LOAD_OP_LH;

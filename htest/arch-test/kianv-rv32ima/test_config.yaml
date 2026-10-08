@@ -1,0 +1,8 @@
+name: kianv-rv32ima
+compiler_exe: riscv64-act-gcc
+objdump_exe: riscv64-linux-gnu-objdump
+ref_model_exe: sail_riscv_sim
+udb_config: kianv-rv32ima.yaml
+linker_script: link.ld
+dut_include_dir: .
+include_priv_tests: False

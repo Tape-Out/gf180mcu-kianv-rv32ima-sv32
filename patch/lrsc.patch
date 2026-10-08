@@ -1,0 +1,31 @@
+diff -ruN a/src/kianv_harris_edition/datapath_unit.v b/src/kianv_harris_edition/datapath_unit.v
+--- a/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.931399806 +0900
++++ b/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.963399796 +0900
+@@ -217,14 +217,26 @@
+       .q     (amo_buffer_addr_value)
+   );
+ 
++  wire amo_reserved;
+   dff_kianV #(1) amo_reserved_state_load_I (
+       .resetn(resetn),
+       .clk   (clk),
+       .d     (amo_buffered_data),
+       .en    (amo_set_reserved_state_load),
+-      .q     (amo_reserved_state_load)
++      .q     (amo_reserved)
+   );
+ 
++  wire [31:0] amo_reserved_addr;
++  dff_kianV #(32) amo_reserved_addr_I (
++      .resetn(resetn),
++      .clk   (clk),
++      .d     (amo_buffer_addr_value),
++      .en    (amo_set_reserved_state_load && amo_buffered_data),
++      .q     (amo_reserved_addr)
++  );
++
++  assign amo_reserved_state_load = amo_reserved && amo_reserved_addr == ALUResult;
++
+   dff_kianV #(32, RESET_ADDR) OldPC_I (
+       resetn,
+       clk,

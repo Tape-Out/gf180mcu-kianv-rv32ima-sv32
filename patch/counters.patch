@@ -1,0 +1,91 @@
+diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
+--- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.259399697 +0900
++++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.291399688 +0900
+@@ -78,13 +78,8 @@
+   wire [31:0] wdata;
+   assign wdata = is_reg_operand ? Rd1 : extended_uimm;
+ 
+-  wire [63:0] instr_counter;
+-  counter #(64) instr_cnt_I (
+-      resetn,
+-      clk,
+-      incr_inst_retired,
+-      instr_counter
+-  );
++  reg  [63:0] instr_counter;
++  reg         instret_hold;
+ 
+   reg  [16:0] acc;
+   wire [16:0] sysclk_q = {1'b0, (sysclk_mhz_q8_8 < 16'h0100) ? 16'h0100 : sysclk_mhz_q8_8};
+@@ -108,13 +103,7 @@
+       timer_counter
+   );
+ 
+-  wire [63:0] cycle_counter;
+-  counter #(64) cycle_counter_I (
+-      resetn,
+-      clk,
+-      1'b1,
+-      cycle_counter
+-  );
++  reg  [63:0] cycle_counter;
+ 
+   reg [31:0] mtimecmp;
+   reg [31:0] mtimecmph;
+@@ -267,10 +256,10 @@
+       `MISA_EXTENSION_BIT(`MISA_EXTENSION_S)
+       |
+       `MISA_EXTENSION_BIT(`MISA_EXTENSION_U);
+-      `CSR_INSTRET: rdata = instr_counter[31:0];
+-      `CSR_INSTRETH: rdata = instr_counter[63:32];
+-      `CSR_CYCLE: rdata = cycle_counter[31:0];
+-      `CSR_CYCLEH: rdata = cycle_counter[63:32];
++      `CSR_INSTRET, `CSR_MINSTRET: rdata = instr_counter[31:0];
++      `CSR_INSTRETH, `CSR_MINSTRETH: rdata = instr_counter[63:32];
++      `CSR_CYCLE, `CSR_MCYCLE: rdata = cycle_counter[31:0];
++      `CSR_CYCLEH, `CSR_MCYCLEH: rdata = cycle_counter[63:32];
+       `CSR_TIME: rdata = timer_counter[31:0];
+       `CSR_TIMEH: rdata = timer_counter[63:32];
+       `CSR_MHARTID: rdata = 32'b0;
+@@ -476,4 +465,27 @@
+     end
+   end
+ 
++  // mcycle 与 minstret 可写；写 minstret 的那一条指令不计数（它在 EXEC_SYSTEM 写、在 SYSTEM_WB 退休，中间没有别的指令）。
++  // mcountinhibit 的 CY、IR 两位停住对应的计数器
++  wire w_cycle   = csr_write_valid && (CSRAddr == `CSR_MCYCLE || CSRAddr == `CSR_MCYCLEH);
++  wire w_instret = csr_write_valid && (CSRAddr == `CSR_MINSTRET || CSRAddr == `CSR_MINSTRETH);
++
++  always @(posedge clk) begin
++    if (!resetn) begin
++      cycle_counter <= 64'd0;
++      instr_counter <= 64'd0;
++      instret_hold  <= 1'b0;
++    end else begin
++      if (w_cycle) cycle_counter <= CSRAddr == `CSR_MCYCLE ? {cycle_counter[63:32], wdata_nxt} : {wdata_nxt, cycle_counter[31:0]};
++      else if (!mcountinhibit[0]) cycle_counter <= cycle_counter + 64'd1;
++      if (w_instret) begin
++        instr_counter <= CSRAddr == `CSR_MINSTRET ? {instr_counter[63:32], wdata_nxt} : {wdata_nxt, instr_counter[31:0]};
++        instret_hold  <= !incr_inst_retired;
++      end else if (incr_inst_retired && !mcountinhibit[2]) begin
++        if (instret_hold) instret_hold <= 1'b0;
++        else instr_counter <= instr_counter + 64'd1;
++      end
++    end
++  end
++
+ endmodule
+diff -ruN a/src/kianv_harris_edition/csr_utilities.vh b/src/kianv_harris_edition/csr_utilities.vh
+--- a/src/kianv_harris_edition/csr_utilities.vh	2026-10-08 23:18:52.259399697 +0900
++++ b/src/kianv_harris_edition/csr_utilities.vh	2026-10-08 23:18:52.291399688 +0900
+@@ -26,6 +26,10 @@
+ `define CSR_CYCLEH 12'h C80
+ `define CSR_INSTRET 12'h C02
+ `define CSR_INSTRETH 12'h C82
++`define CSR_MCYCLE 12'h B00
++`define CSR_MCYCLEH 12'h B80
++`define CSR_MINSTRET 12'h B02
++`define CSR_MINSTRETH 12'h B82
+ `define CSR_TIME 12'h C01
+ `define CSR_TIMEH 12'h C81
+ 

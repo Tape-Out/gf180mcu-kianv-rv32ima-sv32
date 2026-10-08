@@ -1,0 +1,48 @@
+diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
+--- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.203399716 +0900
++++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.235399706 +0900
+@@ -316,7 +316,7 @@
+     begin
+       case (mode)
+         2'b00:   calculate_exception_pc = base_addr;
+-        2'b01:   calculate_exception_pc = base_addr | (cause_ << 2);
++        2'b01:   calculate_exception_pc = cause_[31] ? base_addr | (cause_ << 2) : base_addr;
+         default: calculate_exception_pc = base_addr;
+       endcase
+     end
+diff -ruN a/src/kianv_harris_edition/interrupt_controller.v b/src/kianv_harris_edition/interrupt_controller.v
+--- a/src/kianv_harris_edition/interrupt_controller.v	2026-10-08 23:18:52.207399715 +0900
++++ b/src/kianv_harris_edition/interrupt_controller.v	2026-10-08 23:18:52.235399706 +0900
+@@ -41,7 +41,7 @@
+     input wire [31:0] menvcfgh,
+     input wire [31:0] mcounteren,
+ 
+-    output reg [31:0] mip_next,
++    output wire [31:0] mip_next,
+ 
+     output reg IRQ_TO_CPU_CTRL1,
+     output reg IRQ_TO_CPU_CTRL3,
+@@ -60,6 +60,7 @@
+   reg [31:0] interrupts;
+ 
+   reg [31:0] mip_next_comb;
++  assign mip_next = mip_next_comb;
+   reg        IRQ_TO_CPU_CTRL1_comb;
+   reg        IRQ_TO_CPU_CTRL3_comb;
+   reg        IRQ_TO_CPU_CTRL5_comb;
+@@ -119,7 +120,6 @@
+ 
+   always @(posedge clk) begin
+     if (!resetn) begin
+-      mip_next          <= 32'b0;
+       IRQ_TO_CPU_CTRL1  <= 1'b0;
+       IRQ_TO_CPU_CTRL3  <= 1'b0;
+       IRQ_TO_CPU_CTRL5  <= 1'b0;
+@@ -127,7 +127,6 @@
+       IRQ_TO_CPU_CTRL9  <= 1'b0;
+       IRQ_TO_CPU_CTRL11 <= 1'b0;
+     end else begin
+-      mip_next          <= mip_next_comb;
+       IRQ_TO_CPU_CTRL1  <= IRQ_TO_CPU_CTRL1_comb;
+       IRQ_TO_CPU_CTRL3  <= IRQ_TO_CPU_CTRL3_comb;
+       IRQ_TO_CPU_CTRL5  <= IRQ_TO_CPU_CTRL5_comb;

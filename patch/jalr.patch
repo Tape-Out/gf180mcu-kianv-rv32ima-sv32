@@ -1,0 +1,12 @@
+diff -ruN a/src/kianv_harris_edition/datapath_unit.v b/src/kianv_harris_edition/datapath_unit.v
+--- a/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.875399824 +0900
++++ b/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.907399815 +0900
+@@ -145,7 +145,7 @@
+   assign mem_wstrb   = wmask & {4{MemWrite}};
+ 
+   assign WD3         = Result;
+-  assign PCNext      = Result;
++  assign PCNext      = {Result[31:1], 1'b0};
+ 
+   wire [31:0] amo_temporary_data;
+   wire [31:0] alu_out_or_amo_scw;

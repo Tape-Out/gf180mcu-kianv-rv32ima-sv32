@@ -34,8 +34,7 @@ one() {
 # 不适用的不跑：Zacas 不是 A 本身；非对齐访存、PMP、调试触发器是可选的，KianV 都没做
 SKIP=" rv32ua-p-amocas_w rv32ua-p-amocas_d rv32ui-p-ma_data rv32mi-p-pmpaddr rv32mi-p-breakpoint "
 # 已知失败，必须恰好失败，哪天过了也算红，好知道该改这里（原因见 README）
-KNOWN=" rv32mi-p-illegal rv32mi-p-instret_overflow rv32mi-p-ma_addr rv32mi-p-ma_fetch rv32mi-p-shamt
-        rv32si-p-dirty rv32si-p-ma_fetch "
+KNOWN=" "
 
 n=0; bad=0; kept=0
 for s in rv32ui rv32um rv32ua rv32mi rv32si; do

@@ -1,0 +1,3 @@
+#!/bin/sh
+# ACT4 要 GCC 15，apt 里只有 Linux 工具链是 15：它默认动态链接、位置无关、带 build-id，裸机测试要关掉这三样
+exec riscv64-linux-gnu-gcc-15 -static -no-pie -fno-pic -Wl,--build-id=none "$@"

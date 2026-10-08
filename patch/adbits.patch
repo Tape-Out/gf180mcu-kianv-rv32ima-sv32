@@ -1,0 +1,24 @@
+diff -ruN a/src/kianv_harris_edition/sv32_translate_data_to_physical.v b/src/kianv_harris_edition/sv32_translate_data_to_physical.v
+--- a/src/kianv_harris_edition/sv32_translate_data_to_physical.v	2026-10-08 23:18:52.371399660 +0900
++++ b/src/kianv_harris_edition/sv32_translate_data_to_physical.v	2026-10-08 23:18:52.399399651 +0900
+@@ -140,6 +140,8 @@
+                 end
+               end
+ 
++              if (!`GET_PTE_A(pte_eff) || (is_write && !`GET_PTE_D(pte_eff))) page_fault_nxt = 1'b1;
++
+               page_offset = address & (`SV32_PAGE_SIZE - 1);
+               pagebase_addr        = ( (pte_eff >> `SV32_PTE_ALIGNED_PPN_SHIFT)
+                                       << `SV32_PTE_ALIGNED_PPN_SHIFT );
+diff -ruN a/src/kianv_harris_edition/sv32_translate_instruction_to_physical.v b/src/kianv_harris_edition/sv32_translate_instruction_to_physical.v
+--- a/src/kianv_harris_edition/sv32_translate_instruction_to_physical.v	2026-10-08 23:18:52.371399660 +0900
++++ b/src/kianv_harris_edition/sv32_translate_instruction_to_physical.v	2026-10-08 23:18:52.399399651 +0900
+@@ -124,6 +124,8 @@
+                 end
+               end
+ 
++              if (!`GET_PTE_A(pte)) page_fault_nxt = 1'b1;
++
+               page_offset = address & (`SV32_PAGE_SIZE - 1);
+               pagebase_addr = ((pte >> `SV32_PTE_ALIGNED_PPN_SHIFT) << `SV32_PTE_ALIGNED_PPN_SHIFT);
+               physical_address_nxt = pagebase_addr | page_offset;

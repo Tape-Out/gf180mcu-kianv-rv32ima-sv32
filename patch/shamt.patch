@@ -1,0 +1,11 @@
+diff -ruN a/src/kianv_harris_edition/main_fsm.v b/src/kianv_harris_edition/main_fsm.v
+--- a/src/kianv_harris_edition/main_fsm.v	2026-10-08 23:18:52.043399769 +0900
++++ b/src/kianv_harris_edition/main_fsm.v	2026-10-08 23:18:52.071399759 +0900
+@@ -326,6 +326,7 @@
+           (is_load || is_store):   state_nxt = MEM_ADDR;
+           (is_rtype && !funct7b0): state_nxt = EXEC_RTYPE;
+           (is_rtype && funct7b0):  state_nxt = EXEC_MUL;
++          (is_itype && funct3[1:0] == 2'b01 && funct7b0): state_nxt = ILLEGAL_0;
+           is_itype:                state_nxt = EXEC_ITYPE;
+           is_jal:                  state_nxt = JAL;
+           is_jalr:                 state_nxt = JALR;

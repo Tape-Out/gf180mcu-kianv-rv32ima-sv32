@@ -1,0 +1,33 @@
+diff -ruN a/src/kianv_harris_edition/control_unit.v b/src/kianv_harris_edition/control_unit.v
+--- a/src/kianv_harris_edition/control_unit.v	2026-10-08 23:18:52.095399752 +0900
++++ b/src/kianv_harris_edition/control_unit.v	2026-10-08 23:18:52.127399741 +0900
+@@ -116,6 +116,8 @@
+   wire is_store_unaligned;
+   wire is_instruction_unaligned;
+   assign is_instruction_unaligned = |cpu_mem_addr[1:0];
++  wire fsm_mem_valid;
++  assign mem_valid = fsm_mem_valid && !(is_instruction && is_instruction_unaligned);
+ 
+   wire CSRvalid;
+   main_fsm main_fsm_I (
+@@ -185,7 +187,7 @@
+       .IRQ_TO_CPU_CTRL9 (IRQ_TO_CPU_CTRL9),
+       .IRQ_TO_CPU_CTRL11(IRQ_TO_CPU_CTRL11),
+ 
+-      .mem_valid(mem_valid),
++      .mem_valid(fsm_mem_valid),
+       .mem_ready(mem_ready),
+ 
+       .mul_ext_valid(mul_ext_valid),
+diff -ruN a/src/kianv_harris_edition/main_fsm.v b/src/kianv_harris_edition/main_fsm.v
+--- a/src/kianv_harris_edition/main_fsm.v	2026-10-08 23:18:52.095399752 +0900
++++ b/src/kianv_harris_edition/main_fsm.v	2026-10-08 23:18:52.127399741 +0900
+@@ -661,7 +661,7 @@
+       ALU_WB: begin
+         mem_valid = 1'b1;
+         ResultSrc = `RESULT_ALUOUT;
+-        RegWrite  = 1'b1;
++        RegWrite  = !((is_jal || is_jalr) && is_instruction_unaligned);
+       end
+ 
+       EXEC_ITYPE: begin
