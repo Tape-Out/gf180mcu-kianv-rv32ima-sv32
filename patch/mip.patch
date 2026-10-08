@@ -1,6 +1,5 @@
-diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
---- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.203399716 +0900
-+++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.235399706 +0900
+--- a/src/kianv_harris_edition/csr_unit.v
++++ b/src/kianv_harris_edition/csr_unit.v
 @@ -316,7 +316,7 @@
      begin
        case (mode)
@@ -10,9 +9,8 @@ diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_u
          default: calculate_exception_pc = base_addr;
        endcase
      end
-diff -ruN a/src/kianv_harris_edition/interrupt_controller.v b/src/kianv_harris_edition/interrupt_controller.v
---- a/src/kianv_harris_edition/interrupt_controller.v	2026-10-08 23:18:52.207399715 +0900
-+++ b/src/kianv_harris_edition/interrupt_controller.v	2026-10-08 23:18:52.235399706 +0900
+--- a/src/kianv_harris_edition/interrupt_controller.v
++++ b/src/kianv_harris_edition/interrupt_controller.v
 @@ -41,7 +41,7 @@
      input wire [31:0] menvcfgh,
      input wire [31:0] mcounteren,

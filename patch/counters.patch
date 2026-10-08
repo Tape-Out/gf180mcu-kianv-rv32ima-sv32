@@ -1,6 +1,5 @@
-diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
---- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.259399697 +0900
-+++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.291399688 +0900
+--- a/src/kianv_harris_edition/csr_unit.v
++++ b/src/kianv_harris_edition/csr_unit.v
 @@ -78,13 +78,8 @@
    wire [31:0] wdata;
    assign wdata = is_reg_operand ? Rd1 : extended_uimm;
@@ -75,9 +74,8 @@ diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_u
 +  end
 +
  endmodule
-diff -ruN a/src/kianv_harris_edition/csr_utilities.vh b/src/kianv_harris_edition/csr_utilities.vh
---- a/src/kianv_harris_edition/csr_utilities.vh	2026-10-08 23:18:52.259399697 +0900
-+++ b/src/kianv_harris_edition/csr_utilities.vh	2026-10-08 23:18:52.291399688 +0900
+--- a/src/kianv_harris_edition/csr_utilities.vh
++++ b/src/kianv_harris_edition/csr_utilities.vh
 @@ -26,6 +26,10 @@
  `define CSR_CYCLEH 12'h C80
  `define CSR_INSTRET 12'h C02

@@ -1,6 +1,5 @@
-diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
---- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.315399679 +0900
-+++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:52.343399669 +0900
+--- a/src/kianv_harris_edition/csr_unit.v
++++ b/src/kianv_harris_edition/csr_unit.v
 @@ -67,7 +67,8 @@
    assign csr_privilege_level = CSRAddr[9:8];
    wire csr_read_only;

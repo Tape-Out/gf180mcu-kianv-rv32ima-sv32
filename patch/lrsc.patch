@@ -1,6 +1,5 @@
-diff -ruN a/src/kianv_harris_edition/datapath_unit.v b/src/kianv_harris_edition/datapath_unit.v
---- a/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.931399806 +0900
-+++ b/src/kianv_harris_edition/datapath_unit.v	2026-10-08 23:18:51.963399796 +0900
+--- a/src/kianv_harris_edition/datapath_unit.v
++++ b/src/kianv_harris_edition/datapath_unit.v
 @@ -217,14 +217,26 @@
        .q     (amo_buffer_addr_value)
    );
@@ -29,3 +28,21 @@ diff -ruN a/src/kianv_harris_edition/datapath_unit.v b/src/kianv_harris_edition/
    dff_kianV #(32, RESET_ADDR) OldPC_I (
        resetn,
        clk,
+--- a/src/kianv_harris_edition/main_fsm.v
++++ b/src/kianv_harris_edition/main_fsm.v
+@@ -729,10 +729,11 @@
+       end
+ 
+       AMO_ADDR: begin
+-        ALUSrcA              = `SRCA_RD1_BUF;
+-        ALUSrcB              = `SRCB_CONST_0;
+-        ALUOp                = `ALU_OP_ADD;
+-        amo_buffered_address = 1'b1;
++        ALUSrcA                     = `SRCA_RD1_BUF;
++        ALUSrcB                     = `SRCB_CONST_0;
++        ALUOp                       = `ALU_OP_ADD;
++        amo_buffered_address        = 1'b1;
++        amo_set_reserved_state_load = is_amo_sc_w;
+       end
+ 
+       AMO_LR_READ: begin

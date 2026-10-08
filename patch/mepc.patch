@@ -1,6 +1,5 @@
-diff -ruN a/src/kianv_harris_edition/csr_unit.v b/src/kianv_harris_edition/csr_unit.v
---- a/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:51.791399852 +0900
-+++ b/src/kianv_harris_edition/csr_unit.v	2026-10-08 23:18:51.851399833 +0900
+--- a/src/kianv_harris_edition/csr_unit.v
++++ b/src/kianv_harris_edition/csr_unit.v
 @@ -436,7 +436,7 @@
          `CSR_MIE:           mie_nxt = wdata_nxt;
          `CSR_MIP:           mip_nxt = wdata_nxt;
