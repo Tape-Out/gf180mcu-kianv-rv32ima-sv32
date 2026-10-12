@@ -9,6 +9,8 @@
 //   +script<n>=<文件>      片上多出来的第 n 路串口的脚本，只认 expect 与 send；各路都走完才算过。
 //                          编仿真器时给了 -CFLAGS -DCONSOLES=<路数> 才有，这几路接在 tb 的 con_tx、con_rx 上
 //   +restore=<文件>        从断点接着跑：save 存下的，脚本从头走；+stop 存下的，同一份脚本从停下的那一步接着走
+//   +saveend=<文件>        各份脚本都走完时存一个断点（与 save 存的一样，之后的脚本从头走）：几路串口各有脚本时，
+//                          「都到了」这一刻哪一份脚本都看不见，由测试台来存
 //   +stop=<n>@<文件>       这一次跑满 n 个周期就把断点存进文件、算过退出：一个作业放不下的启动分几个作业跑完；
 //                          写成 <n>s 是跑满 n 秒，托管机快慢不一，按时间分段才不会超时
 //   +spiecho               两路 SPI 上各挂一个回声从设备；不给时 MISO 是高的，像没插卡、没接网卡
@@ -722,7 +724,7 @@ int main(int argc, char **argv) {
   std::vector<Step> script;
   std::vector<std::string> rejects;
   std::string hit;
-  std::string restore, stopfile;
+  std::string restore, stopfile, saveend;
   uint64_t max = 50'000'000, beat = 0, stop = 0;
   bool stopsec = false;
 #ifdef CONSOLES
@@ -785,6 +787,7 @@ int main(int argc, char **argv) {
     else if (auto v = val("+max=")) max = strtoull(v, nullptr, 0);
     else if (auto v = val("+beat=")) beat = strtoull(v, nullptr, 0);
     else if (auto v = val("+restore=")) restore = v;
+    else if (auto v = val("+saveend=")) saveend = v;
     else if (auto v = val("+stop=")) {
       const char *at = strchr(v, '@');
       if (!at) { fprintf(stderr, "+stop=<周期数或秒数 s>@<断点文件>\n"); return 2; }
@@ -956,6 +959,10 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+  if (ok && !stopped && !saveend.empty()) {
+    cont = 0;
+    ckpt(saveend, true);
+  }
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   if (stopped)
