@@ -1,0 +1,40 @@
+--- a/src/kianv_harris_edition/main_fsm.v
++++ b/src/kianv_harris_edition/main_fsm.v
+@@ -255,7 +255,8 @@
+     endcase
+   end
+ 
+-  assign ALUOutWrite = !mem_valid;
++  // AMO：旧值在 AMO_OP_WB 那一拍进 ALUOut，留到写内存成功之后才写进 rd，中间两拍不许盖掉
++  assign ALUOutWrite = !mem_valid && state != AMO_OP_EXEC && state != AMO_OP_ADDR;
+ 
+   always @(*) begin
+     case (1'b1)
+@@ -481,7 +482,7 @@
+           is_store_unaligned: state_nxt = STORE_MISALIGN_0;
+           access_fault:       state_nxt = STORE_FAULT_0;
+           page_fault:         state_nxt = SPAGE_FAULT_0;
+-          mem_ready:          state_nxt = FETCH;
++          mem_ready:          state_nxt = AMO_COMPLETE;
+           default:            state_nxt = AMO_OP_WRITE;
+         endcase
+       end
+@@ -787,8 +788,6 @@
+         ALUOp     = `ALU_OP_ADD;
+         ALUSrcA   = `SRCA_AMO_TEMP_DATA;
+         ALUSrcB   = `SRCB_CONST_0;
+-        ResultSrc = `RESULT_DATA;
+-        RegWrite  = 1'b1;
+       end
+ 
+       AMO_OP_EXEC: begin
+@@ -814,7 +813,9 @@
+         mem_valid       = !is_store_unaligned;
+       end
+ 
++      // 写内存缺页的 AMO 走不到这里：rd 与内存都没动，指令重来时源寄存器还是原值
+       AMO_COMPLETE: begin
++        RegWrite  = 1'b1;
+         mem_valid = 1'b1;
+       end
+ 

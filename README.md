@@ -53,6 +53,8 @@ The `hello` task boots a bare-metal program from the flash at `0x2010_0000`: it 
 
 The `isa` task runs the standard riscv-tests (`p` environment; rv32ui, um, ua, mi and si) on the whole SoC: each program is placed in the SDRAM model, the flash holds two instructions that jump to it, and the bench watches `tohost`. All 79 that apply pass.
 
+After them it runs the directed tests under `htest/isa/`, in the same environment: `amo_fault` maps the memory read-only and checks that an AMO or `sc.w` whose store faults has changed neither a register nor memory when it traps, and completes correctly once the page is made writable.
+
 Not run, because the core does not implement them: `amocas_w` and `amocas_d` (Zacas, not part of A), `ma_data` (misaligned accesses in hardware are optional), `pmpaddr` (no PMP) and `breakpoint` (no debug triggers; `tselect` does not exist).
 
 The `arch-test` task runs the unprivileged part of riscv-arch-test (ACT4) the same way: 71 self-checking programs for I, M, Zmmul, Zaamo, Zalrsc, Zicsr, Zifencei and Zicntr, all of which pass. The expected values come from the Sail model and are compiled into each program, which writes 1 or 3 to `tohost` and prints the mismatching register on the UART when it fails. `htest/arch-test/kianv-rv32ima/` is the configuration, derived from ACT4's `sail-RVI20U32` (no F, D, C or Zihpm; 32 MiB of RAM; output through the on-chip UART). `htest/arch-test/build.sh` compiles the programs; ACT4 draws fresh random operands on every build, so the pack is published once and pinned by digest in `htest/arch-test.pin`.
@@ -76,6 +78,7 @@ The submodule is never edited. `htest/setup.sh` copies upstream's sources to `bu
 | `tvm.patch` | With `mstatus.TVM` set, S-mode access to `satp` did not trap |
 | `adbits.patch` | Translation ignored the A and D bits. A page with A clear, or a store to a page with D clear, now raises a page fault and software sets them (Svade) |
 | `ptw.patch` | A superpage with nonzero low PPN bits was used with them masked, and a pointer at the last level was walked one level further; both now raise a page fault |
+| `wbamo.patch` | An AMO wrote the old memory value to `rd` before its store. When the store took a page fault, as on a copy-on-write page, the instruction restarted with `rd` already overwritten; with `rd` and `rs2` the same register, as GCC emits for an atomic exchange, it stored the old value back, and a lock released that way stayed locked. `rd` is now written after the store has succeeded |
 
 ## Limits
 

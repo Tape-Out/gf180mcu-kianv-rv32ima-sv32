@@ -37,21 +37,29 @@ SKIP=" rv32ua-p-amocas_w rv32ua-p-amocas_d rv32ui-p-ma_data rv32mi-p-pmpaddr rv3
 KNOWN=" "
 
 n=0; bad=0; kept=0
+# $1 是源文件，$2 是用例名
+try() {
+  local t=$1 b=$2 e="$O/$2"
+  [[ $SKIP == *" $b "* ]] && return
+  n=$((n + 1))
+  if one "$t" "$R/env/p" "$e"; then
+    if [[ $KNOWN == *" $b"[[:space:]]* ]]; then echo "FAIL $b 是已知失败却过了"; bad=$((bad + 1)); fi
+  elif [[ $KNOWN == *" $b"[[:space:]]* ]]; then
+    kept=$((kept + 1))
+  else
+    echo "FAIL $b：$(grep -a 'tohost' "$e.log" | tail -n 1)"; bad=$((bad + 1))
+  fi
+}
 for s in rv32ui rv32um rv32ua rv32mi rv32si; do
   for t in "$R"/isa/$s/*.S; do
-    b=$s-p-$(basename "$t" .S)
-    [[ $SKIP == *" $b "* ]] && continue
-    e="$O/$b"
-    n=$((n + 1))
-    if one "$t" "$R/env/p" "$e"; then
-      [[ $KNOWN == *" $b"[[:space:]]* ]] && { echo "FAIL $b 是已知失败却过了"; bad=$((bad + 1)); }
-    elif [[ $KNOWN == *" $b"[[:space:]]* ]]; then
-      kept=$((kept + 1))
-    else
-      echo "FAIL $b：$(grep -a 'tohost' "$e.log" | tail -n 1)"; bad=$((bad + 1))
-    fi
+    try "$t" "$s-p-$(basename "$t" .S)"
   done
 done
+std=$n
+# 上游那一套没测到的，自己补的定向测试，同一个环境、同一种跑法
+for t in htest/isa/*.S; do
+  try "$t" "own-p-$(basename "$t" .S)"
+done
 
-echo "跑 $n 个，$bad 个不过，已知失败 $kept 个，不适用 $(wc -w <<< "$SKIP") 个"
+echo "跑 $n 个（riscv-tests $std 个，自写的 $((n - std)) 个），$bad 个不过，已知失败 $kept 个，不适用 $(wc -w <<< "$SKIP") 个"
 [ "$n" -gt 0 ] && [ "$bad" = 0 ]
