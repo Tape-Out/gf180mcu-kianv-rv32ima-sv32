@@ -952,7 +952,8 @@ int main(int argc, char **argv) {
   for (auto &l : held) puts(l.c_str());
   for (int k = 0; k < CONSOLES; ++k) {
     Console &n = con[k];
-    if (!n.line.empty()) printf("[uart%d] %s\n", k + 1, n.line.c_str());
+    // 接力的一棒停下时没打完的那半行留给下一棒：它带在断点里，到行尾再打
+    if (!n.line.empty() && !stopped) printf("[uart%d] %s\n", k + 1, n.line.c_str());
     if (n.at < n.script.size() && !stopped) {
       ok = false;
       fprintf(stderr, "\n第 %d 路串口卡在：%s %s", k + 1, n.script[n.at].kind == 's' ? "send" : "expect", n.script[n.at].text.c_str());
