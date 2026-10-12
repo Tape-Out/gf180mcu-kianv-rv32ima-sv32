@@ -6,6 +6,8 @@
 //   +tohost=<地址>         盯 riscv-tests 的 tohost：写 1 算过，写别的数算不过；给了它就不必给脚本
 //   +script=<文件>         逐行 expect <文本> / send <文本> / save <文件>，全部走完算过；
 //                          reject <文本> 不占次序，串口上一出现这段字就算不过，不必等到 +max
+//   +script<n>=<文件>      片上多出来的第 n 路串口的脚本，只认 expect 与 send；各路都走完才算过。
+//                          编仿真器时给了 -CFLAGS -DCONSOLES=<路数> 才有，这几路接在 tb 的 con_tx、con_rx 上
 //   +restore=<文件>        从断点接着跑：save 存下的，脚本从头走；+stop 存下的，同一份脚本从停下的那一步接着走
 //   +stop=<n>@<文件>       这一次跑满 n 个周期就把断点存进文件、算过退出：一个作业放不下的启动分几个作业跑完；
 //                          写成 <n>s 是跑满 n 秒，托管机快慢不一，按时间分段才不会超时
@@ -75,9 +77,17 @@ struct Ckpt {
   }
 };
 
-// MT48LC16M16A2：4 个 bank、13 位行、9 位列、16 位数据。只建功能，不查时序参数
+// 板上那颗 SDRAM 列地址的位数，编仿真器时定：9 位是 32 MiB 的片子（MT48LC16M16A2），
+// 10 位是同封装 64 MiB 的（MT48LC32M16A2），换了它的那一颗给 sim.sh 多带一句 -CFLAGS -DSDRAM_COLS=10
+#ifndef SDRAM_COLS
+#define SDRAM_COLS 9
+#endif
+
+// 4 个 bank、13 位行、SDRAM_COLS 位列、16 位数据。只建功能，不查时序参数
 struct Sdram {
-  std::vector<uint16_t> mem = std::vector<uint16_t>(1u << 24);
+  static constexpr int cb = SDRAM_COLS;
+  static constexpr uint32_t bytes = 2u << (15 + cb);
+  std::vector<uint16_t> mem = std::vector<uint16_t>(1u << (15 + cb));
   uint32_t row[4] = {};
   int cl = 2, bl = 1;
   long edge = 0;
@@ -92,11 +102,12 @@ struct Sdram {
   bool hit = false;
   uint16_t host = 0;
 
-  // 控制器把地址拆成 bank = addr[22:21]、行 = {addr[24:23], addr[20:10]}、列 = addr[9:1]，模型按 bank、行、列排。
+  // 控制器把地址拆成 bank = addr[22:21]、行 = {addr[24:23], addr[20:10]}、列 = addr[9:1]，模型按 bank、行、列排；
+  // 列宽 10 位时一行多一位，行 = {addr[25:23], addr[20:11]}、列 = addr[10:1]。
   // 给的是 SDRAM 里的字节偏移，回的是它在模型里的字节偏移
   static uint32_t wire(uint32_t a) {
-    uint32_t blk = a >> 10, bank = blk >> 11 & 3, row = (blk >> 13 & 3) << 11 | (blk & 0x7ff);
-    return (bank << 13 | row) << 10 | (a & 0x3ff);
+    uint32_t lo = cb + 1, bank = a >> 21 & 3, row = (a >> 23) << (20 - cb) | (a >> lo & ((1u << (20 - cb)) - 1));
+    return (bank << 13 | row) << lo | (a & ((1u << lo) - 1));
   }
 
   void ckpt(Ckpt &c) {
@@ -123,11 +134,11 @@ struct Sdram {
       case 0: bl = 1 << (a & 7); cl = (a >> 4) & 7; break;
       case 3: row[ba] = a; break;
       case 4:
-        wbase = ba << 22 | row[ba] << 9, wcol = a & 0x1ff, wleft = bl, wi = 0;
+        wbase = ba << (13 + cb) | row[ba] << cb, wcol = a & ((1u << cb) - 1), wleft = bl, wi = 0;
         put(out);
         break;
       case 5: {
-        uint32_t base = ba << 22 | row[ba] << 9, col = a & 0x1ff;
+        uint32_t base = ba << (13 + cb) | row[ba] << cb, col = a & ((1u << cb) - 1);
         while (!rd.empty() && rd.back().at >= edge + cl - 1) rd.pop_back();
         for (int i = 0; i < bl; ++i) rd.push_back({edge + cl - 1 + i, mem[at(base, col, i)]});
         wleft = 0, ++reads;
@@ -603,6 +614,43 @@ struct Uart {
 
 struct Step { char kind; std::string text; };
 
+#ifdef CONSOLES
+// 片上不止一路串口的那几颗：多出来的 CONSOLES 路接在 tb 的 con_tx、con_rx 上（编仿真器时给 -CFLAGS -DCONSOLES=<路数>），
+// 各有一份脚本（+script1= 起），只认 expect 与 send。收到的字按行加上 [uartN] 打出来，
+// 等主串口那边正好在行首时才打，不把它的一行拆开
+struct Console {
+  Uart uart;
+  std::vector<Step> script;
+  size_t at = 0, from = 0;
+  bool sending = false;
+  std::string seen, line;
+
+  void ckpt(Ckpt &c, bool restart) {
+    uart.ckpt(c), c(at), c(from), c(sending), c.str(seen), c.str(line);
+    if (restart) at = from = 0, sending = false, seen.clear();
+  }
+  // 回一整行（不含换行）；还没到行尾回 false
+  bool put(char ch, std::string &out) {
+    seen += ch;
+    if (ch == '\r') return false;
+    if (ch != '\n') { line += ch; return false; }
+    out.swap(line), line.clear();
+    return true;
+  }
+  void step() {
+    if (at >= script.size()) return;
+    if (script[at].kind == 's') {
+      if (!sending) {
+        for (char ch : script[at].text) uart.q.push_back(ch);
+        sending = true, from = seen.size();
+      } else if (uart.idle()) sending = false, ++at;
+    } else if (seen.find(script[at].text, from) != std::string::npos) {
+      ++at, from = seen.size();
+    }
+  }
+};
+#endif
+
 static std::string unesc(const std::string &s) {
   std::string o;
   for (size_t i = 0; i < s.size(); ++i) {
@@ -677,13 +725,35 @@ int main(int argc, char **argv) {
   std::string restore, stopfile;
   uint64_t max = 50'000'000, beat = 0, stop = 0;
   bool stopsec = false;
+#ifdef CONSOLES
+  Console con[CONSOLES];
+  std::vector<std::string> held;
+#endif
+
+  // save 只给主串口的脚本用：断点存的是整个测试台
+  auto parse = [&](const char *file, std::vector<Step> &to, bool main) {
+    std::ifstream f(file);
+    if (!f) { fprintf(stderr, "打不开 %s\n", file); return false; }
+    for (std::string l; std::getline(f, l);) {
+      if (l.rfind("expect ", 0) == 0) to.push_back({'e', unesc(l.substr(7))});
+      else if (l.rfind("send ", 0) == 0) to.push_back({'s', unesc(l.substr(5))});
+      else if (main && l.rfind("save ", 0) == 0) to.push_back({'c', l.substr(5)});
+      else if (main && l.rfind("reject ", 0) == 0) rejects.push_back(unesc(l.substr(7)));
+    }
+    return true;
+  };
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto val = [&](const char *k) { return a.rfind(k, 0) == 0 ? a.c_str() + strlen(k) : nullptr; };
     if (auto v = val("+flash=")) { if (!load(flash.mem, v)) return 2; }
+#ifdef CONSOLES
+    else if (a.rfind("+script", 0) == 0 && a.size() > 9 && a[7] >= '1' && a[7] < '1' + CONSOLES && a[8] == '=') {
+      if (!parse(a.c_str() + 9, con[a[7] - '1'].script, false)) return 2;
+    }
+#endif
     else if (auto v = val("+sdram=")) {
-      std::vector<uint8_t> b(32u << 20);
+      std::vector<uint8_t> b(Sdram::bytes);
       if (!load(b, v)) return 2;
       for (size_t k = 0; k < b.size(); ++k) {
         uint32_t m = Sdram::wire(k);
@@ -721,17 +791,11 @@ int main(int argc, char **argv) {
       char *end;
       stop = strtoull(v, &end, 0), stopsec = *end == 's', stopfile = at + 1;
     }
-    else if (auto v = val("+script=")) {
-      std::ifstream f(v);
-      if (!f) { fprintf(stderr, "打不开 %s\n", v); return 2; }
-      for (std::string l; std::getline(f, l);) {
-        if (l.rfind("expect ", 0) == 0) script.push_back({'e', unesc(l.substr(7))});
-        else if (l.rfind("send ", 0) == 0) script.push_back({'s', unesc(l.substr(5))});
-        else if (l.rfind("save ", 0) == 0) script.push_back({'c', l.substr(5)});
-        else if (l.rfind("reject ", 0) == 0) rejects.push_back(unesc(l.substr(7)));
-      }
-    }
+    else if (auto v = val("+script=")) { if (!parse(v, script, true)) return 2; }
   }
+#ifdef CONSOLES
+  for (auto &n : con) n.uart.div = uart.div, n.uart.pace = uart.pace;
+#endif
 
   auto top = new Vtb;
   uint64_t in = 1ull << pad::UART_RX | 1ull << pad::SPI0_MISO | 1ull << pad::FLASH_MISO | 1ull << pad::SPI1_MISO;
@@ -748,6 +812,9 @@ int main(int argc, char **argv) {
     sdram.ckpt(c), flash.ckpt(c), uart.ckpt(c), sd.ckpt(c), net.ckpt(c), c(in), c(cyc);
     c(cont), c(at), c(from), c(sending), c.str(uart.seen);
     if (!out && !cont) at = from = 0, sending = false, uart.seen.clear();
+#ifdef CONSOLES
+    for (auto &n : con) n.ckpt(c, !out && !cont);
+#endif
     fclose(c.f);
     if (out) {
       VerilatedSave os;
@@ -770,7 +837,16 @@ int main(int argc, char **argv) {
   uint64_t start = cyc;
   bool stopped = false;
   auto t0 = std::chrono::steady_clock::now();
-  auto waiting = [&] { return at < script.size() || (sdram.watch >= 0 && !sdram.hit); };
+  auto waiting = [&] {
+#ifdef CONSOLES
+    for (auto &n : con)
+      if (n.at < n.script.size()) return true;
+#endif
+    return at < script.size() || (sdram.watch >= 0 && !sdram.hit);
+  };
+#ifdef CONSOLES
+  top->con_rx = (1u << CONSOLES) - 1;
+#endif
   for (; cyc - start < max && waiting() && hit.empty(); ++cyc) {
     if (stop && (stopsec ? (cyc & 0xfffff) == 0 &&
                                std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(stop)
@@ -824,6 +900,25 @@ int main(int argc, char **argv) {
         if (uart.seen.size() >= r.size() && !uart.seen.compare(uart.seen.size() - r.size(), r.size(), r)) hit = r;
     }
     uart.send();
+#ifdef CONSOLES
+    {
+      uint32_t rx = 0;
+      for (int k = 0; k < CONSOLES; ++k) {
+        Console &n = con[k];
+        std::string l;
+        if (n.uart.recv(top->con_tx >> k & 1, c) && n.put(c, l)) held.push_back("[uart" + std::to_string(k + 1) + "] " + l);
+        n.uart.send();
+        n.step();
+        rx |= (uint32_t)n.uart.tx << k;
+      }
+      top->con_rx = rx;
+      if (!held.empty() && (uart.seen.empty() || uart.seen.back() == '\n')) {
+        for (auto &l : held) puts(l.c_str());
+        held.clear();
+        fflush(stdout);
+      }
+    }
+#endif
 
     if (at >= script.size()) {
     } else if (script[at].kind == 's') {
@@ -848,9 +943,21 @@ int main(int argc, char **argv) {
     sdram.clk(top->pad_out);
     in = (in & ~(0xffffull << pad::SD_DQ)) | (uint64_t)sdram.dq << pad::SD_DQ;
   }
+  bool ok = stopped || (hit.empty() && (sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty()));
+#ifdef CONSOLES
+  if (!held.empty() && !uart.seen.empty() && uart.seen.back() != '\n') putchar('\n');
+  for (auto &l : held) puts(l.c_str());
+  for (int k = 0; k < CONSOLES; ++k) {
+    Console &n = con[k];
+    if (!n.line.empty()) printf("[uart%d] %s\n", k + 1, n.line.c_str());
+    if (n.at < n.script.size() && !stopped) {
+      ok = false;
+      fprintf(stderr, "\n第 %d 路串口卡在：%s %s", k + 1, n.script[n.at].kind == 's' ? "send" : "expect", n.script[n.at].text.c_str());
+    }
+  }
+#endif
   fflush(stdout);
   double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  bool ok = stopped || (hit.empty() && (sdram.watch >= 0 ? sdram.hit && sdram.host == 1 : at == script.size() && !script.empty()));
   if (stopped)
     fprintf(stderr, "\n停在这里：脚本走到 %zu/%zu，断点 %s；同一份脚本加 +restore=%s 接着跑", at, script.size(), stopfile.c_str(),
             stopfile.c_str());

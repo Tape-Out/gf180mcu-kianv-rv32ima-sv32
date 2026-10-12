@@ -2,6 +2,8 @@
 # 把测试台与给定的 Verilog 编成 <目录>/Vtb。顶层必须叫 tb，口子是 clk、rst_n、pad_in、pad_out、pad_oe 三条 54 位总线。
 # 用法：sim.sh <目录> <verilator 的源文件与选项…>
 # 给了 SIM_GPU=<to2610_gpu.v> 时把那颗也编进去（前缀 Vgpu，单独成库再链进来），测试台的 +gpu 才能用
+# 板上的件与 to2610-kvc 不同的那几颗，在选项里跟 -CFLAGS：-DSDRAM_COLS=10 是 64 MiB 的 SDRAM；
+# -DCONSOLES=<n> 是多出来的 n 路串口，这时 tb 还要有 con_rx（往芯片发）、con_tx 两个 n 位的口子
 set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
 D=$(realpath -m "$1")
